@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "BSP/LED/led.h"
 #include "BSP/KEY/key.h"
+#include "BSP/EXIT/exti.h"
 
 void app_main(void)
 {
@@ -18,7 +19,7 @@ void app_main(void)
     }
     led_init();
     key_init(); /* 初始化 LED */
-    /* KEY 初始化 */
+    exit_init(); /* 初始化外部中断 */
 
     while (1)
     {

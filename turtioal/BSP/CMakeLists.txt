@@ -1,9 +1,11 @@
 set(src_dirs
 KEY
-LED)
+LED
+EXTI)
 set(include_dirs
 KEY
-LED)
+LED
+EXTI)
 set(requires
 driver)
 idf_component_register(SRC_DIRS ${src_dirs}
