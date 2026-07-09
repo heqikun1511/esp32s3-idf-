@@ -1,6 +1,8 @@
 #include "key.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
+#include "BSP/LED/led.h"
+
 void key_init(void)
 {
     gpio_config_t gpio_init_struct;

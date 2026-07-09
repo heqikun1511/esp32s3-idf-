@@ -1,3 +1,5 @@
+#ifndef __KEY_H__
+#define __KEY_H__
 #include <stdint.h>
 
 /* 引脚定义 */
@@ -11,3 +13,5 @@
 void key_init(void);
 /* 初始化按键 */
 uint8_t key_scan(uint8_t mode); /* 按键扫描函数 */
+
+#endif /* __KEY_H__ */

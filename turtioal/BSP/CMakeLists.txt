@@ -1,11 +1,15 @@
 set(src_dirs
 KEY
 LED
-EXTI)
+EXTI
+UART
+esptim)
 set(include_dirs
 KEY
 LED
-EXTI)
+EXTI
+UART
+esptim)
 set(requires
 driver)
 idf_component_register(SRC_DIRS ${src_dirs}
