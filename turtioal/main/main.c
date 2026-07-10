@@ -10,6 +10,7 @@
 #include "BSP/UART/uart.h"
 #include "driver/uart.h"
 #include "BSP/esptim/esptim.h"
+#include "BSP/WDT/wdt.h"
 
 void app_main(void)
 {
@@ -28,59 +29,19 @@ void app_main(void)
     key_init();  /* 初始化 LED */
     exit_init(); /* 初始化外部中断 */
     led_init();
-    esptim_int_init(1000000);
+    // esptim_int_init(1000000);
+    wdt_init(1000000); /* 初始化看门狗定时器，设置超时时间为 1 秒（1000000 μs） */
+
     while (1)
     {
 
-        // uint8_t key = key_scan(0); /* 获取键值 */
-        // switch (key)
-        // {
-        // case BOOT_PRES:
-        // {
-        //     LED_TOGGLE();
-        //     break;
-        // }
-        // default:
-        // {
-        //     break;
-        // }
-        // }
-        // /* BOOT 被按下 */
-        // /* LED 状态翻转 */
-        // vTaskDelay(10);
-        // /* 获取环形缓冲区数据长度 */
-        // uart_get_buffered_data_len(USART_UX, (size_t *)&len);
-        // if (len > 0)
-        // {
-        //     memset(data, 0, RX_BUF_SIZE);
-        //     printf("\n 您发送的消息为:\n");
-        //     uart_read_bytes(USART_UX, data, len, 100);
-        //     uart_write_bytes(USART_UX,
-        //                      (const char *)data,
-        //                      strlen((const char *)data));
-        //     vTaskDelay(10);
-        // }
-        // else
-        // {
-        //     /* 判断数据长度 */
-        //     /* 对缓冲区清零 */
-        //     /* 读数据 */
-        //     /* 写数据 */
-        //     vTaskDelay(10);
-        // }
-        // times++;
-        // if (times % 5000 == 0)
-        // {
-        //     printf("\n 串口实验\n");
-        
-        // }
-        // if (times % 200 == 0)
-        // {
-        //     printf("请输入数据，以回车键结束\n");
-        // }
-        // if (times % 30 == 0)
-        // {
-        //     LED_TOGGLE();
-        // }
+        if (key_scan(0) == BOOT_PRES)
+        {
+            wdt_feed(1000000); /* 按下 BOOT 键喂狗，重新计时 1 秒 */
+        }
+        /* 如果 BOOT 按下则喂狗 */
+        /* 喂狗 */
+        /* LED 闪烁 */
+        vTaskDelay(10);
     }
 }

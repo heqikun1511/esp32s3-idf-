@@ -3,12 +3,14 @@ KEY
 LED
 EXTI
 UART
+WDT
 esptim)
 set(include_dirs
 KEY
 LED
 EXTI
 UART
+WDT
 esptim)
 set(requires
 driver)
