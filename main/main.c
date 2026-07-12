@@ -41,4 +41,5 @@ void app_main(void)
     }
 
     lvgl_demo();                /* 运行LVGL例程 */
+    
 }

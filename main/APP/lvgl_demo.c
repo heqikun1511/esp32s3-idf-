@@ -22,9 +22,14 @@
 #include "lcd.h"
 #include "touch.h"
 #include "esp_timer.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "lvgl.h"
-#include "demos/lv_demos.h"
+#include "ui/ui.h"
 
+/* MIPI竖屏旋转标志和PSRAM旋转缓冲区 */
+static bool g_need_rotate = false;
+static lv_color_t *g_rot_buf = NULL;
 
 /**
  * @brief       lvgl_demo入口函数
@@ -46,12 +51,8 @@ void lvgl_demo(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));     /* 创建定时器 */
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 1 * 1000));           /* 启动定时器 */
 
-    /* 官方demo,需要在SDK Configuration中开启对应Demo */
-    lv_demo_music();      
-    // lv_demo_benchmark();
-    // lv_demo_widgets();
-    // lv_demo_stress();
-    // lv_demo_keypad_encoder();
+    /* EEZ Studio UI */
+    ui_init();
 
     while (1)
     {
@@ -103,7 +104,7 @@ lv_disp_t *lv_port_disp_init(void)
     {
         ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1])); 
     }
-    size_t draw_buffer_sz = lcddev.width * lcddev.height * sizeof(lv_color_t);          /* 计算绘画缓冲区大小 */
+    size_t draw_buffer_sz = lcddev.width * lcddev.height;                          /* 计算绘画缓冲区大小(像素数) */
 
     /* 初始化显示缓冲区 */
     static lv_disp_draw_buf_t disp_buf;                                                 /* 保存显示缓冲区信息的结构体 */
@@ -114,11 +115,23 @@ lv_disp_t *lv_port_disp_init(void)
     lv_disp_drv_init(&disp_drv);        /* 初始化显示设备 */
     
     /* 设置显示设备的分辨率 
-     * 这里为了适配正点原子的多款屏幕，采用了动态获取的方式，
-     * 在实际项目中，通常所使用的屏幕大小是固定的，因此可以直接设置为屏幕的大小 
+     * MIPI屏为竖屏(1080x1920)，通过在flush回调中手动旋转实现横屏(1920x1080)
      */
-    disp_drv.hor_res = lcddev.width;                    /* 设置水平分辨率 */
-    disp_drv.ver_res = lcddev.height;                   /* 设置垂直分辨率 */
+    g_need_rotate = (lcddev.height > lcddev.width);
+    if (g_need_rotate) {
+        disp_drv.hor_res = lcddev.height;               /* 逻辑横屏: 1920 */
+        disp_drv.ver_res = lcddev.width;                /* 逻辑横屏: 1080 */
+        ESP_LOGI("lvgl_demo", "MIPI portrait, logical landscape: %dx%d", disp_drv.hor_res, disp_drv.ver_res);
+        /* 分配PSRAM旋转缓冲区 */
+        if (!g_rot_buf) {
+            g_rot_buf = (lv_color_t *)heap_caps_malloc(lcddev.width * lcddev.height * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+            ESP_LOGI("lvgl_demo", "Rotate buffer: %p size=%d", g_rot_buf, lcddev.width * lcddev.height * (int)sizeof(lv_color_t));
+        }
+    } else {
+        disp_drv.hor_res = lcddev.width;                /* 水平分辨率 */
+        disp_drv.ver_res = lcddev.height;               /* 垂直分辨率 */
+        ESP_LOGI("lvgl_demo", "RGB landscape: %dx%d", lcddev.width, lcddev.height);
+    }
 
     /* 用来将缓冲区的内容复制到显示设备 */
     disp_drv.flush_cb = lvgl_disp_flush_cb;             /* 设置刷新回调函数 */
@@ -127,7 +140,7 @@ lv_disp_t *lv_port_disp_init(void)
     disp_drv.draw_buf = &disp_buf;                      /* 设置绘画缓冲区 */
 
     disp_drv.user_data = lcddev.lcd_panel_handle;       /* 传递屏幕控制句柄 */
-    disp_drv.full_refresh = 1;                          /* 设置为完全刷新 */
+    disp_drv.full_refresh = 1;                          /* 全刷新 */
     /* 注册显示设备 */
     return lv_disp_drv_register(&disp_drv);                    
 }
@@ -169,8 +182,29 @@ static void lvgl_disp_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_col
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
 
-    /* 特定区域打点 */
-    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_map);
+    if (g_need_rotate) {
+        /* 手动旋转: 将逻辑横屏(1920x1080)旋转为物理竖屏(1080x1920) */
+        int32_t logical_w = lv_area_get_width(area);
+        int32_t logical_h = lv_area_get_height(area);
+        lv_coord_t phys_w = lcddev.width;   /* 1080 */
+        lv_coord_t phys_h = lcddev.height;  /* 1920 */
+
+        for (int32_t ly = area->y1; ly <= area->y2; ly++) {
+            for (int32_t lx = area->x1; lx <= area->x2; lx++) {
+                /* 逻辑坐标(lx, ly) → 物理坐标(px, py), 90度旋转 */
+                /* 注意: 用 logical_w (1920) 计算 py, 不是 phys_w (1080) */
+                lv_coord_t px = ly;
+                lv_coord_t py = logical_w - 1 - lx;
+                if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
+                    g_rot_buf[py * phys_w + px] = color_map[(ly - area->y1) * logical_w + (lx - area->x1)];
+                }
+            }
+        }
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, phys_w, phys_h, (uint8_t *)g_rot_buf);
+    } else {
+        /* 不旋转，直接刷新 */
+        esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, (uint8_t *)color_map);
+    }
 
     /* 重要!!! 通知图形库，已经刷新完毕了 */
     lv_disp_flush_ready(drv);
@@ -232,6 +266,12 @@ void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     if(touchpad_is_pressed())
     {
         touchpad_get_xy(&last_x, &last_y);  /* 在触摸屏被按下的时候读取 x、y 坐标 */
+        /* 横屏旋转: 触摸物理坐标→逻辑坐标 */
+        if (g_need_rotate) {
+            lv_coord_t tmp = last_x;
+            last_x = last_y;
+            last_y = lcddev.height - 1 - tmp;  /* 用height(1920)不是width(1080) */
+        }
         data->state = LV_INDEV_STATE_PR;
     } 
     else
