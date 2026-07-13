@@ -17,7 +17,7 @@ void init_style_regular_button_MAIN_DEFAULT(lv_style_t *style) {
 lv_style_t *get_style_regular_button_MAIN_DEFAULT() {
     static lv_style_t *style;
     if (!style) {
-        style = (lv_style_t *)lv_mem_alloc(sizeof(lv_style_t));
+        style = (lv_style_t *)lv_malloc(sizeof(lv_style_t));
         lv_style_init(style);
         init_style_regular_button_MAIN_DEFAULT(style);
     }
@@ -45,7 +45,7 @@ void init_style_logo_MAIN_DEFAULT(lv_style_t *style) {
 lv_style_t *get_style_logo_MAIN_DEFAULT() {
     static lv_style_t *style;
     if (!style) {
-        style = (lv_style_t *)lv_mem_alloc(sizeof(lv_style_t));
+        style = (lv_style_t *)lv_malloc(sizeof(lv_style_t));
         lv_style_init(style);
         init_style_logo_MAIN_DEFAULT(style);
     }
@@ -68,13 +68,13 @@ void remove_style_logo(lv_obj_t *obj) {
 
 void init_style_example_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_text_color(style, lv_color_hex(0x212121));
-    lv_style_set_text_font(style, &lv_font_montserrat_22);
+    lv_style_set_text_font(style, &lv_font_montserrat_48)lv_font_montserrat_48);
 };
 
 lv_style_t *get_style_example_MAIN_DEFAULT() {
     static lv_style_t *style;
     if (!style) {
-        style = (lv_style_t *)lv_mem_alloc(sizeof(lv_style_t));
+        style = (lv_style_t *)lv_malloc(sizeof(lv_style_t));
         lv_style_init(style);
         init_style_example_MAIN_DEFAULT(style);
     }
@@ -104,7 +104,7 @@ void init_style_lap_MAIN_DEFAULT(lv_style_t *style) {
 lv_style_t *get_style_lap_MAIN_DEFAULT() {
     static lv_style_t *style;
     if (!style) {
-        style = (lv_style_t *)lv_mem_alloc(sizeof(lv_style_t));
+        style = (lv_style_t *)lv_malloc(sizeof(lv_style_t));
         lv_style_init(style);
         init_style_lap_MAIN_DEFAULT(style);
     }
@@ -135,7 +135,7 @@ void init_style_amoy_MAIN_DEFAULT(lv_style_t *style) {
 lv_style_t *get_style_amoy_MAIN_DEFAULT() {
     static lv_style_t *style;
     if (!style) {
-        style = (lv_style_t *)lv_mem_alloc(sizeof(lv_style_t));
+        style = (lv_style_t *)lv_malloc(sizeof(lv_style_t));
         lv_style_init(style);
         init_style_amoy_MAIN_DEFAULT(style);
     }
@@ -158,13 +158,13 @@ void remove_style_amoy(lv_obj_t *obj) {
 
 void init_style_all_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_text_color(style, lv_color_hex(0xe4e1e1));
-    lv_style_set_text_font(style, &lv_font_montserrat_24);
+    lv_style_set_text_font(style, &lv_font_montserrat_48)lv_font_montserrat_48);
 };
 
 lv_style_t *get_style_all_MAIN_DEFAULT() {
     static lv_style_t *style;
     if (!style) {
-        style = (lv_style_t *)lv_mem_alloc(sizeof(lv_style_t));
+        style = (lv_style_t *)lv_malloc(sizeof(lv_style_t));
         lv_style_init(style);
         init_style_all_MAIN_DEFAULT(style);
     }
