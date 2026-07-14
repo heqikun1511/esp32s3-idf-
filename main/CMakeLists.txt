@@ -9,4 +9,5 @@ idf_component_register(
         "APP"
         "ui"
         "BSP"
-    REQUIRES)
+    REQUIRES
+        driver)
