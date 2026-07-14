@@ -185,3 +185,84 @@ app_main()
   ├── ui_update_task ← 创建 UI 更新任务 ✅
   └── System started ✅
 ```
+
+---
+
+# 运行时问题修复总结（二）
+
+## 问题 1：屏幕显示后 `lvgl_timer` 栈溢出崩溃
+
+### 现象
+
+```
+Guru Meditation Error: Core 0 panic'ed (Stack protection fault)
+Detected in task "lvgl_timer" at lv_draw_sw_blend_color_to_rgb565.c:256
+Stack pointer: 0x4ff3bb70
+Stack bounds: 0x4ff3bb78 - 0x4ff3cb70
+```
+
+**SP (0x4ff3bb70) < Stack bounds (0x4ff3bb78)** → 栈指针溢出。
+
+### 根因
+
+`lvgl_timer` 任务栈仅 **4096 字节**，而 LVGL 的软件渲染（字体位图解压、颜色混合 `lv_draw_sw_blend_to_rgb565`）需要更深的调用栈。在 PARTIAL / FULL 模式下执行首次全屏渲染时，函数调用链路过深导致栈溢出。
+
+### 修复 — `main/APP/lvgl_demo.c`
+
+```
+xTaskCreatePinnedToCore(
+    lvgl_timer_task,
+    "lvgl_timer",
+    8192,       // ← 4096 → 8192 字节
+    ...
+);
+```
+
+---
+
+## 问题 2：PARTIAL 渲染模式 + 旋转导致花屏
+
+### 现象
+
+屏幕显示花屏/乱码。
+
+### 根因
+
+尝试改为 `LV_DISPLAY_RENDER_MODE_PARTIAL` 以降低刷新率，但 PARTIAL 模式与**手动旋转缓冲区**不兼容：
+
+| 问题 | 说明 |
+|------|------|
+| PARTIAL 分块渲染 | LVGL 将屏幕分成 50 行一块，逐块调用 flush_cb |
+| 旋转后数据散布 | 每块旋转后的像素分散在 `g_rot_buf` 的物理坐标位置 |
+| MIPI DSI 要求连续 | `esp_lcd_panel_draw_bitmap` 期望缓冲区数据是连续的矩形区域 |
+| **结果** | 旋转后的散落数据不符合 DSI 要求 → **花屏** |
+
+### 修复方案
+
+回退到 `LV_DISPLAY_RENDER_MODE_FULL` + 硬件双帧缓冲：
+
+```c
+// 恢复 FULL 模式 + 硬件帧缓冲
+lv_display_set_buffers(disp, lcd_buffer[0], lcd_buffer[1], buf_size,
+                       LV_DISPLAY_RENDER_MODE_FULL);
+```
+
+| 模式 | 效果 |
+|------|------|
+| `FULL` + 双缓冲 | LVGL 渲染到离屏缓冲 → 整帧旋转 → 整帧 MIPI DSI 刷新 → **正确显示** |
+| `ui_update_task` 优化 | 仅在数值变化时更新 LVGL 对象，不触发无效刷新 |
+| 无变化时 | `lv_timer_handler()` 什么都不做，屏幕 **完全静止常亮** |
+
+### 最终任务状态
+
+| 任务 | 栈大小 | 优先级 | 说明 |
+|------|--------|--------|------|
+| `lvgl_timer` | **8192** ✅ | 2 | LVGL 定时器处理，栈空间充足 |
+| `can_rx` | 4096 | 5 | CAN 接收，最高优先级 |
+| `ui_update` | 4096 | 3 | UI 数据更新 |
+
+### 经验教训
+
+1. **PARTIAL 模式 + 手动旋转不兼容** — 旋转后像素在缓冲区的物理坐标是散列的，而 MIPI DSI 的 `draw_bitmap` 期望连续的行主序数据。如需局部刷新，需额外分配一块连续的目标区域缓冲区。
+2. **LVGL 任务栈至少 8192** — 软件渲染的调用链（draw → blend → font bitmap → malloc）深度较大，4096 不够。
+3. **FULL 模式在无变化时不会刷新** — LVGL 不会无缘无故重绘，屏幕常亮没有问题。

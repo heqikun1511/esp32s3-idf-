@@ -33,9 +33,6 @@
 static bool g_need_rotate = false;
 static uint16_t *g_rot_buf = NULL;
 
-/* PARTIAL渲染模式的缓冲区高度(行数) */
-#define PARTIAL_BUF_HEIGHT  50
-
 /**
  * @brief       LVGL定时器处理任务(独立任务,避免阻塞app_main)
  * @param       arg : 未使用
@@ -175,12 +172,11 @@ static void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_
 
     if (g_need_rotate) {
         /* 手动旋转: 逻辑横屏(1920x1080) → 物理竖屏(1080x1920)
-         * 逻辑坐标(lx, ly) → 物理坐标(px=ly, py=logical_total_w-1-lx)
-         * 仅旋转area指定的脏区域, 然后只刷新旋转后的物理区域
+         * FULL模式: area = 全屏, 旋转整个缓冲区后刷新整个物理屏
          */
         uint16_t *src = (uint16_t *)px_map;
         lv_coord_t logical_total_w = lv_display_get_horizontal_resolution(disp);
-        lv_coord_t area_w = lv_area_get_width(area);
+        lv_coord_t logical_w = lv_area_get_width(area);
         lv_coord_t phys_w = lcddev.width;
         lv_coord_t phys_h = lcddev.height;
 
@@ -189,29 +185,12 @@ static void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_
                 lv_coord_t px = ly;
                 lv_coord_t py = logical_total_w - 1 - lx;
                 if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
-                    g_rot_buf[py * phys_w + px] = src[(ly - area->y1) * area_w + (lx - area->x1)];
+                    g_rot_buf[py * phys_w + px] = src[(ly - area->y1) * logical_w + (lx - area->x1)];
                 }
             }
         }
-
-        /* 计算旋转后脏区域在物理屏幕上的包围盒
-         * 逻辑rect (x1,y1)-(x2,y2) → 物理rect:
-         *   phys_x1 = y1, phys_x2 = y2+1
-         *   phys_y1 = logical_total_w-1-x2, phys_y2 = logical_total_w-1-x1+1
-         */
-        lv_coord_t flush_x1 = area->y1;
-        lv_coord_t flush_x2 = area->y2 + 1;
-        lv_coord_t flush_y1 = logical_total_w - 1 - area->x2;
-        lv_coord_t flush_y2 = logical_total_w - 1 - area->x1 + 1;
-
-        /* 限制在物理屏幕范围内 */
-        if (flush_x1 < 0) flush_x1 = 0;
-        if (flush_x2 > phys_w) flush_x2 = phys_w;
-        if (flush_y1 < 0) flush_y1 = 0;
-        if (flush_y2 > phys_h) flush_y2 = phys_h;
-
-        esp_lcd_panel_draw_bitmap(panel_handle, flush_x1, flush_y1, flush_x2, flush_y2,
-                                  (uint8_t *)g_rot_buf);
+        /* FULL模式: 刷新整个物理屏幕 */
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, phys_w, phys_h, (uint8_t *)g_rot_buf);
     } else {
         /* 非旋转: 只刷新变化的区域 */
         esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1,
