@@ -24,12 +24,33 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "ui/ui.h"
 
 /* MIPI竖屏旋转和PSRAM旋转缓冲区 */
 static bool g_need_rotate = false;
 static uint16_t *g_rot_buf = NULL;
+
+/* PARTIAL渲染模式的缓冲区高度(行数) */
+#define PARTIAL_BUF_HEIGHT  50
+
+/**
+ * @brief       LVGL定时器处理任务(独立任务,避免阻塞app_main)
+ * @param       arg : 未使用
+ * @retval      无
+ */
+static void lvgl_timer_task(void *arg)
+{
+    ESP_LOGI("lvgl_demo", "LVGL timer task started");
+
+    while (1)
+    {
+        lv_timer_handler();             /* LVGL计时器处理 */
+        vTaskDelay(pdMS_TO_TICKS(10));  /* 延时10毫秒 */
+    }
+}
 
 /**
  * @brief       lvgl_demo入口函数
@@ -54,11 +75,18 @@ void lvgl_demo(void)
     /* EEZ Studio UI */
     ui_init();
 
-    while (1)
-    {
-        lv_timer_handler();             /* LVGL计时器 */
-        vTaskDelay(pdMS_TO_TICKS(10));  /* 延时10毫秒 */
-    }
+    /* 创建独立任务运行 lv_timer_handler 循环, 避免阻塞 app_main
+     * 注意: LVGL软件渲染需要较大栈空间, 8192为安全值
+     */
+    xTaskCreatePinnedToCore(
+        lvgl_timer_task,
+        "lvgl_timer",
+        8192,
+        NULL,
+        2,              /* 较低优先级, 让CAN和UI更新任务优先 */
+        NULL,
+        tskNO_AFFINITY
+    );
 }
 
 /**
@@ -91,22 +119,25 @@ lv_display_t *lv_port_disp_init(void)
     if (g_need_rotate) {
         /* 逻辑分辨率 = 横屏 1920x1080 */
         disp = lv_display_create(lcddev.height, lcddev.width);
-        /* PSRAM旋转缓冲区 */
+        /* PSRAM旋转缓冲区 (全屏大小, 用于旋转) */
         if (!g_rot_buf) {
             g_rot_buf = (uint16_t *)heap_caps_malloc(lcddev.width * lcddev.height * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
             ESP_LOGI("lvgl_demo", "Rotate buffer: %p", g_rot_buf);
         }
         buf_size = lcddev.height * lcddev.width * sizeof(uint16_t);
-        ESP_LOGI("lvgl_demo", "MIPI portrait, logical landscape: %dx%d", lcddev.height, lcddev.width);
+        ESP_LOGI("lvgl_demo", "MIPI portrait, logical landscape: %dx%d, FULL buf=%dKB",
+                 lcddev.height, lcddev.width, buf_size / 1024);
     } else {
         disp = lv_display_create(lcddev.width, lcddev.height);
         buf_size = lcddev.width * lcddev.height * sizeof(uint16_t);
-        ESP_LOGI("lvgl_demo", "RGB landscape: %dx%d", lcddev.width, lcddev.height);
+        ESP_LOGI("lvgl_demo", "RGB landscape: %dx%d, FULL buf=%dKB",
+                 lcddev.width, lcddev.height, buf_size / 1024);
     }
     
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, lvgl_disp_flush_cb);
     lv_display_set_user_data(disp, lcddev.lcd_panel_handle);
+    /* FULL模式: 全屏渲染, 配合硬件双缓冲, 无变化时不刷新 */
     lv_display_set_buffers(disp, lcd_buffer[0], lcd_buffer[1], buf_size, LV_DISPLAY_RENDER_MODE_FULL);
     
     return disp;                    
@@ -143,25 +174,48 @@ static void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
 
     if (g_need_rotate) {
-        /* 手动旋转: 逻辑横屏(1920x1080) → 物理竖屏(1080x1920) */
+        /* 手动旋转: 逻辑横屏(1920x1080) → 物理竖屏(1080x1920)
+         * 逻辑坐标(lx, ly) → 物理坐标(px=ly, py=logical_total_w-1-lx)
+         * 仅旋转area指定的脏区域, 然后只刷新旋转后的物理区域
+         */
         uint16_t *src = (uint16_t *)px_map;
-        lv_coord_t logical_w = lv_area_get_width(area);
-        lv_coord_t logical_h = lv_area_get_height(area);
+        lv_coord_t logical_total_w = lv_display_get_horizontal_resolution(disp);
+        lv_coord_t area_w = lv_area_get_width(area);
         lv_coord_t phys_w = lcddev.width;
         lv_coord_t phys_h = lcddev.height;
 
         for (lv_coord_t ly = area->y1; ly <= area->y2; ly++) {
             for (lv_coord_t lx = area->x1; lx <= area->x2; lx++) {
                 lv_coord_t px = ly;
-                lv_coord_t py = logical_w - 1 - lx;
+                lv_coord_t py = logical_total_w - 1 - lx;
                 if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
-                    g_rot_buf[py * phys_w + px] = src[(ly - area->y1) * logical_w + (lx - area->x1)];
+                    g_rot_buf[py * phys_w + px] = src[(ly - area->y1) * area_w + (lx - area->x1)];
                 }
             }
         }
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, phys_w, phys_h, (uint8_t *)g_rot_buf);
+
+        /* 计算旋转后脏区域在物理屏幕上的包围盒
+         * 逻辑rect (x1,y1)-(x2,y2) → 物理rect:
+         *   phys_x1 = y1, phys_x2 = y2+1
+         *   phys_y1 = logical_total_w-1-x2, phys_y2 = logical_total_w-1-x1+1
+         */
+        lv_coord_t flush_x1 = area->y1;
+        lv_coord_t flush_x2 = area->y2 + 1;
+        lv_coord_t flush_y1 = logical_total_w - 1 - area->x2;
+        lv_coord_t flush_y2 = logical_total_w - 1 - area->x1 + 1;
+
+        /* 限制在物理屏幕范围内 */
+        if (flush_x1 < 0) flush_x1 = 0;
+        if (flush_x2 > phys_w) flush_x2 = phys_w;
+        if (flush_y1 < 0) flush_y1 = 0;
+        if (flush_y2 > phys_h) flush_y2 = phys_h;
+
+        esp_lcd_panel_draw_bitmap(panel_handle, flush_x1, flush_y1, flush_x2, flush_y2,
+                                  (uint8_t *)g_rot_buf);
     } else {
-        esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+        /* 非旋转: 只刷新变化的区域 */
+        esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1,
+                                  area->x2 + 1, area->y2 + 1, px_map);
     }
     lv_display_flush_ready(disp);
 }

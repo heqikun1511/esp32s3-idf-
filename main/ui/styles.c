@@ -68,7 +68,7 @@ void remove_style_logo(lv_obj_t *obj) {
 
 void init_style_example_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_text_color(style, lv_color_hex(0x212121));
-    lv_style_set_text_font(style, &lv_font_montserrat_48)lv_font_montserrat_48);
+    lv_style_set_text_font(style, &lv_font_montserrat_48);
 };
 
 lv_style_t *get_style_example_MAIN_DEFAULT() {
@@ -158,7 +158,7 @@ void remove_style_amoy(lv_obj_t *obj) {
 
 void init_style_all_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_text_color(style, lv_color_hex(0xe4e1e1));
-    lv_style_set_text_font(style, &lv_font_montserrat_48)lv_font_montserrat_48);
+    lv_style_set_text_font(style, &lv_font_montserrat_48);
 };
 
 lv_style_t *get_style_all_MAIN_DEFAULT() {

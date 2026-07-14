@@ -10,4 +10,7 @@ idf_component_register(
         "ui"
         "BSP"
     REQUIRES
-        driver)
+        driver
+        nvs_flash
+        esp_timer
+        BSP)

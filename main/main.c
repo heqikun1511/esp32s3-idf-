@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
+#include "hal/gpio_types.h"
 #include "lvgl.h"
 #include "lvgl_demo.h"
 #include "bsp_can.h"
@@ -38,9 +39,9 @@ static volatile int g_current_rpm = 0;
 static SemaphoreHandle_t g_rpm_mutex = NULL;
 
 /* CAN TX引脚 (根据实际硬件修改) */
-#define CAN_TX_PIN  GPIO_NUM_1
+#define CAN_TX_PIN  GPIO_NUM_27
 /* CAN RX引脚 (根据实际硬件修改) */
-#define CAN_RX_PIN  GPIO_NUM_2
+#define CAN_RX_PIN  GPIO_NUM_26
 
 /**
  * @brief       CAN数据接收回调(在CAN任务上下文中调用)
@@ -207,4 +208,5 @@ void app_main(void)
     );
     
     ESP_LOGI(TAG, "System started");
+    
 }
