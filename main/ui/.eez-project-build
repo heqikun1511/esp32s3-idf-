@@ -11,6 +11,8 @@
     "styles.h",
     "ui.c",
     "ui.h",
+    "ui_image_ami_ui_board.c",
+    "ui_image_logo.c",
     "vars.h"
   ]
 }

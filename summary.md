@@ -231,7 +231,7 @@ xTaskCreatePinnedToCore(
 尝试改为 `LV_DISPLAY_RENDER_MODE_PARTIAL` 以降低刷新率，但 PARTIAL 模式与**手动旋转缓冲区**不兼容：
 
 | 问题 | 说明 |
-|------|------|
+|------|--summary.md----|
 | PARTIAL 分块渲染 | LVGL 将屏幕分成 50 行一块，逐块调用 flush_cb |
 | 旋转后数据散布 | 每块旋转后的像素分散在 `g_rot_buf` 的物理坐标位置 |
 | MIPI DSI 要求连续 | `esp_lcd_panel_draw_bitmap` 期望缓冲区数据是连续的矩形区域 |
@@ -266,3 +266,59 @@ lv_display_set_buffers(disp, lcd_buffer[0], lcd_buffer[1], buf_size,
 1. **PARTIAL 模式 + 手动旋转不兼容** — 旋转后像素在缓冲区的物理坐标是散列的，而 MIPI DSI 的 `draw_bitmap` 期望连续的行主序数据。如需局部刷新，需额外分配一块连续的目标区域缓冲区。
 2. **LVGL 任务栈至少 8192** — 软件渲染的调用链（draw → blend → font bitmap → malloc）深度较大，4096 不够。
 3. **FULL 模式在无变化时不会刷新** — LVGL 不会无缘无故重绘，屏幕常亮没有问题。
+
+---
+
+# 编译错误修复总结（三）
+
+## 修复前summary.md----|---------|------|
+| 1 | `main/main.c:117` | `'bb' undeclared` / `expected ';'` | 编辑器残留文本 `bb,0` |
+| 2 | `main/main.c:159` | `expected '(' before 'vTaskDelay'` | 孤立无条件的 `if` 语句 |
+| 3 | `main/ui/screens.c:252` | `'lv_font_montserrat_40' undeclared` | `CONFIG_LV_FONT_MONTSERRAT_40` 未启用 |
+
+## 修复详情
+
+### 1. `main/main.c` — 编辑器残留 `bb,0`
+
+第 117 行有意外写入的文本 `bb,0`，导致后续所有变量声明（如 `speed_val`）被认为是非声明语句而报错。
+
+**修复[text](summary.md)**：删除 `bb,0`。
+
+### 2. `main/main.c` — 孤立 `if`
+
+第 159 行有一个无条件的 `if`（缺少条件和花括号），导致 `vTaskDelay` 的语法错误。
+
+**修复**：删除孤立的 `if`。 
+
+### 3. `sdkconfig` — 字体未启用
+
+`ui/screens.c` 使用了 `lv_font_montserrat_40`，但 `sdkconfig` 中 `CONFIG_LV_FONT_MONTSERRAT_40` 未设置。
+
+**修复**：
+```
+# sdkconfig — 启用字体
+CONFIG_LV_FONT_MONTSERRAT_40=y
+```
+
+## 分区问题修复
+
+固件 `lvgl_transplant.bin` 大小约 **9.1MB**，但：
+- 默认分区表 `partitions_singleapp.csv` 的 `factory` 分区仅 **1MB**
+- 闪存大小配置为 **2MB**
+
+### 修复
+
+| 修改 | 前值 | 后值 |
+|------|------|------|
+| 闪存大小 | `2MB` | `16MB` |
+| 分区表类型 | `SINGLE_APP` | `CUSTOM` |
+| 分区表文件 | `partitions_singleapp.csv` | `partitions-16MiB.csv` |
+| `facsummary.mdtory` 分区大小 | `0x100000` (1MB) | `0xE00000` (14MB) |
+| `partitions.csv` | 不存在 | 从 `partitions-16MiB.csv` 复制 |
+
+**构建结果**：
+```
+lvgl_transplant.bin binary size 0x8f1600 bytes.
+Smallest app partition is 0xe00000 bytes.
+0x50ea00 bytes (36%) free.
+```

@@ -56,7 +56,7 @@ static void lvgl_timer_task(void *arg)
  */
 void lvgl_demo(void)
 {
-    lv_init();              /* 初始化LVGL图形库 */
+    lv_init();              /* 初始化LVGL图形to_rgb565.c:256库 */
     lv_port_disp_init();    /* lvgl显示接口初始化,放在lv_init()的后面 */
     lv_port_indev_init();   /* lvgl输入接口初始化,放在lv_init()的后面 */
 
@@ -119,7 +119,7 @@ lv_display_t *lv_port_disp_init(void)
         /* PSRAM旋转缓冲区 (全屏大小, 用于旋转) */
         if (!g_rot_buf) {
             g_rot_buf = (uint16_t *)heap_caps_malloc(lcddev.width * lcddev.height * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-            ESP_LOGI("lvgl_demo", "Rotate buffer: %p", g_rot_buf);
+            ESP_LOGI("lvgl_demo", "Rotate bto_rgb565.c:256uffer: %p", g_rot_buf);
         }
         buf_size = lcddev.height * lcddev.width * sizeof(uint16_t);
         ESP_LOGI("lvgl_demo", "MIPI portrait, logical landscape: %dx%d, FULL buf=%dKB",
@@ -166,7 +166,7 @@ lv_indev_t *lv_port_indev_init(void)
 * @param        px_map : 像素数据 (uint8_t*)
 * @retval       无
 */
-static void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
 
@@ -204,7 +204,7 @@ static void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_
  * @param       arg : 传入参数(未用到)
  * @retval      无
  */
-static void increase_lvgl_tick(void *arg)
+void increase_lvgl_tick(void *arg)
 {
     /* 告诉LVGL已经过了多少毫秒 */
     lv_tick_inc(1);
@@ -236,8 +236,19 @@ static bool touchpad_is_pressed(void)
  */
 static void touchpad_get_xy(lv_coord_t *x, lv_coord_t *y)
 {
-    (*x) = tp_dev.x[0];
-    (*y) = tp_dev.y[0];
+    if (g_need_rotate) {
+        /* 物理触摸坐标(竖屏 1080x1920) → LVGL逻辑坐标(横屏 1920x1080)
+         * flush_cb逆映射:
+         *   物理坐标(px, py) → 逻辑坐标(lx, ly)
+         *   lx = lcddev.height - 1 - py
+         *   ly = px
+         */
+        *x = lcddev.height - 1 - tp_dev.y[0];
+        *y = tp_dev.x[0];
+    } else {
+        (*x) = tp_dev.x[0];
+        (*y) = tp_dev.y[0];
+    }
 }
 
 /**

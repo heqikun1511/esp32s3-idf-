@@ -29,7 +29,7 @@ void lvgl_demo(void);                                                           
 lv_display_t *lv_port_disp_init(void);                                                              /* 初始化并注册显示设备 */
 lv_indev_t *lv_port_indev_init(void);                                                               /* 初始化并注册输入设备 */
 void touchpad_read(lv_indev_t * indev, lv_indev_data_t * data);                                     /* 图形库的触摸屏读取回调函数 */
-static void increase_lvgl_tick(void *arg);                                                          /* 告诉LVGL运行时间 */
-static void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);         /* 将内部缓冲区的内容刷新到显示屏上的特定区域 */
+void increase_lvgl_tick(void *arg);                                                          /* 告诉LVGL运行时间 */
+void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);         /* 将内部缓冲区的内容刷新到显示屏上的特定区域 */
 
 #endif

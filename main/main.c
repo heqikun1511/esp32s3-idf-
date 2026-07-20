@@ -30,6 +30,7 @@
 #include "bsp_can.h"
 #include "ui/ui.h"
 #include "ui/screens.h"
+#include "ui/images.h"
 
 static const char *TAG = "MAIN";
 
