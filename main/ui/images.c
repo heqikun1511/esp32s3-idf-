@@ -1,9 +1,12 @@
 #include "images.h"
 
-const ext_img_desc_t images[5] = {
+const ext_img_desc_t images[8] = {
     { "AMI_UI_BOARD", &img_ami_ui_board },
     { "logo", &img_logo },
-    { "acc_picture", &img_acc_picture },
-    { "foll_picture", &img_foll_picture },
-    { "eight_picture", &img_eight_picture },
+    { "batt", &img_batt },
+    { "N", &img_n },
+    { "NS", &img_ns },
+    { "1", &img_1 },
+    { "fire", &img_fire },
+    { "warn", &img_warn },
 };

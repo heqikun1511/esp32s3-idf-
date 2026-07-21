@@ -117,10 +117,10 @@ static void ui_update_task(void *arg)
             last_rpm = current_rpm;
 
             /* 更新 RPM 标签 */
-            if (objects.rpm_value)
+            if (objects.rpm)
             {
                 snprintf(buf, sizeof(buf), "%04d", abs(current_rpm));
-                lv_label_set_text_static(objects.rpm_value, buf);
+                lv_label_set_text_static(objects.rpm, buf);
             }
 
             /* 更新车速显示 (将转速按比例映射到0-120范围, 可根据实际调整) */
@@ -132,27 +132,10 @@ static void ui_update_task(void *arg)
                 last_speed = speed_val;
 
                 /* 更新车速标签 */
-                if (objects.label_speed)
+                if (objects.km_h_value)
                 {
                     snprintf(buf, sizeof(buf), "%03d", speed_val);
-                    lv_label_set_text_static(objects.label_speed, buf);
-                }
-
-                /* 更新车速表指针 (needle line) */
-                if (objects.table)
-                {
-                    /* 获取scale下的第一个line子对象(即指针) */
-                    lv_obj_t *needle = lv_obj_get_child(objects.table, 0);
-                    if (needle)
-                    {
-                        lv_scale_set_line_needle_value(objects.table, needle, -10, speed_val);
-                    }
-                }
-
-                /* 更新弧形指示器 */
-                if (objects.indicator1)
-                {
-                    lv_arc_set_value(objects.indicator1, (speed_val * 100) / 120);
+                    lv_label_set_text_static(objects.km_h_value, buf);
                 }
             }
         }

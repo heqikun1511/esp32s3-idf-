@@ -11,8 +11,14 @@
     "styles.h",
     "ui.c",
     "ui.h",
+    "ui_image_1.c",
     "ui_image_ami_ui_board.c",
+    "ui_image_batt.c",
+    "ui_image_fire.c",
     "ui_image_logo.c",
+    "ui_image_n.c",
+    "ui_image_ns.c",
+    "ui_image_warn.c",
     "vars.h"
   ]
 }
