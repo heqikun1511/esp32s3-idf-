@@ -9,4 +9,4 @@ __pycache__/
 *.pyc
 .vscode/
 *.csv
-managed_components/
+managed_components/main/ui/ui_image_logo.c

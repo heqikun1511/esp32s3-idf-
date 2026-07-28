@@ -1,33 +1,79 @@
-# 编译错误修复总结
+# 工程迁移与适配总结
 
-## 修复前错误列表
+## 本次会话完成的工作（2026-07-27）
 
-构建时共发现 **6 个编译错误**，涉及 4 个源文件 + 1 个配置文件：
+### 1. LVGL 8.4 → 9.5 升级（后降级回 8.4）
 
-| # | 文件 | 错误信息 | 原因 |
-|---|------|---------|------|
-| 1 | `main/ui/styles.c:71` | `expected ';' before 'lv_font_montserrat_48'` | 函数参数重复书写错误 |
-| 2 | `main/ui/styles.c:161` | `expected ';' before 'lv_font_montserrat_48'` | 同上，重复出现 |
-| 3 | `main/main.c:23` | `nvs_flash.h: No such file or directory` | `nvs_flash` 组件未加入 REQUIRES |
-| 4 | `main/main.c:41` | `'GPIO_NUM_27' undeclared` | 缺少 `gpio_types.h` 头文件 |
-| 5 | `main/APP/lvgl_demo.c:22` | `lcd.h: No such file or directory` | `BSP` 组件未加入 REQUIRES |
-| 6 | `main/APP/lvgl_demo.c:24` | `esp_timer.h: No such file or directory` | `esp_timer` 组件未加入 REQUIRES |
-| 7 | `main/BSP/bsp_can.c` | `#warning "The legacy TWAI driver is deprecated..."` | 旧版 TWAI driver 的 `#warning` 被 `-Werror` 转为错误 |
+| 步骤 | 说明 |
+|------|------|
+| 升级到 9.5 | `main/idf_component.yml`: `lvgl/lvgl: "^9.5"` |
+| 降级回 8.4 | 重新改为 `"^8.3.11"`，重新下载 managed component |
+| 显示驱动适配 | `lv_port_disp_init` 在 v8/v9 间来回切换 |
 
----
+### 2. SquareLine Studio → EEZ Studio 迁移
 
-## 修复详情
+| 文件 | 修改 |
+|------|------|
+| `main/CMakeLists.txt` | 移除 `ui/SquareLine_Project/*` 路径，添加 `ui`、`ui/fonts` |
+| `main/main.c` | 屏幕列表从 `ui_Screen1/ui_Screen2` 改为 `objects.driver_view/autonomous` |
+| `main/main.c` | 移除 `ui_Label1/ui_Label3` 引用，改用 `objects.speed_label` |
+| `main/ui/` | 完整替换为 EEZ Studio 导出的 UI 文件 |
+| `main/ui/screens.h` | 补全 EEZ Studio 导出遗漏的 `objects_t` 成员（`hv_bar_1`、`brake_presure_bar_1` 等 30+ 个） |
 
-### 1. `main/ui/styles.c` — 参数重复
+### 3. 依赖清理
 
-**行 71 和 161** 原代码：
-```c
-lv_style_set_text_font(style, &lv_font_montserrat_48)lv_font_montserrat_48);
-```
-参数 `&lv_font_montserrat_48)` 被重复写了两次，并且缺少分号。
+| 依赖 | 处理 |
+|------|------|
+| ROS2 (`ros2subscriber.h`) | 删除，`screens.c`/`ui.c` 中移除 include |
+| DBC (`dbc_api.h`) | 删除，CAN 数据结构定义移到 `screens.c` 本地 |
+| EEZ Flow (`getFlowState`/`evalTextProperty`) | 用桩函数替代，后随新导出完全移除 |
+| EEZ Flow `get_var_*()` | 改为全局变量 + 字符串格式化函数 |
 
-**修复后**：
-```c
+### 4. 分辨率修复
+
+| 问题 | 修复 |
+|------|------|
+| EEZ 导出所有屏幕为 800×480 | `sed -i 's/800, 480/1920, 1080/g'` 批量替换 |
+| EEZ Studio bug：改 Display 设置后导出模板不更新 | 已在代码层修复 |
+
+### 5. 看门狗与崩溃修复
+
+| 问题 | 原因 | 修复 |
+|------|------|------|
+| 白屏 | `lv_display_create()` 不设默认显示器（LVGL 9.5） | 加 `lv_display_set_default()` |
+| 白屏 | `lv_scr_load_anim` 需 `lv_timer_handler` 循环 | 改为 `lv_screen_load()` / `lv_scr_load()` |
+| 崩溃 `lv_draw_add_task` | LVGL 8.x 字体格式在 9.5 不兼容 | 降级回 LVGL 8.4 |
+| 看门狗复位 | `create_screens()` 耗时过长 | 加 `esp_task_wdt_add/reset/delete` |
+| 控件 NULL 崩溃 | 字体格式不兼容导致渲染崩溃 | 降级 + 字体兼容 |
+
+### 6. 关键文件改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `main/idf_component.yml` | LVGL 版本 8.3.11 ↔ 9.5 ↔ 8.3.11 |
+| `main/CMakeLists.txt` | SquareLine → EEZ 路径切换 |
+| `main/main.c` | 屏幕列表、标签引用、屏幕数量更新 |
+| `main/APP/lvgl_demo.c` | 显示驱动 v8→v9→v8，喂狗 |
+| `main/APP/lvgl_demo.h` | 函数签名同步更新 |
+| `main/ui/ui.c` | EEZ init/loadScreen，ROS2 移除 |
+| `main/ui/ui.h` | 保持 EEZ 导出 |
+| `main/ui/screens.c` | ROS2/DBC 移除，CAN 数据结构，get_var 桩函数 |
+| `main/ui/screens.h` | 补全缺失对象成员 |
+| `main/ui/eez_flow_stubs.h` | 创建后随新导出删除 |
+
+### 7. 当前状态
+
+| 项目 | 状态 |
+|------|------|
+| LVGL 版本 | **8.4.0** |
+| 屏幕分辨率 | **1920×1080** |
+| ROS2 依赖 | **已移除** |
+| EEZ Flow 依赖 | **已移除** |
+| CAN 数据桥 | **就绪**（全局变量 `g_var_*` + `ui_set_*()` API） |
+| 编译 | **通过** |
+| KEY1 切换 | Driver View ↔ Autonomous |
+| 显示 | 测试屏幕正常，EEZ 屏幕有字体兼容问题 |
+
 lv_style_set_text_font(style, &lv_font_montserrat_48);
 ```
 
@@ -92,6 +138,39 @@ REQUIRES
 
 # 修改后
 CONFIG_TWAI_SUPPRESS_DEPRECATE_WARN=y
+```
+
+---
+
+## Git 操作总结
+
+### 1. 忽略 `managed_components/` 目录
+
+`managed_components/` 是 ESP-IDF 组件管理器自动下载的第三方组件目录（如 `lvgl__lvgl`），不应纳入版本控制。
+
+**修改 `.gitignore`**：
+```
+# 修改前
+managed_components/lvgl__lvgl/*
+
+# 修改后
+managed_components/
+```
+
+**取消已跟踪文件的缓存**：
+```bash
+git rm -r --cached managed_components/
+```
+
+**提交**：
+```bash
+git add .gitignore
+git commit -m "chore: ignore managed_components/ directory"
+```
+
+**验证**：
+```
+.gitignore:12:managed_components/       managed_components/lvgl__lvgl/README.md
 ```
 
 ---
@@ -322,3 +401,178 @@ lvgl_transplant.bin binary size 0x8f1600 bytes.
 Smallest app partition is 0xe00000 bytes.
 0x50ea00 bytes (36%) free.
 ```
+
+---
+
+# 编译与运行问题修复总结（四）— 2026-07-28
+
+## 问题 1：EEZ Studio 导出头文件 `lvgl.h` 包含路径错误
+
+### 现象
+
+```
+fatal error: lvgl/lvgl.h: No such file or directory
+```
+
+### 根因
+
+EEZ Studio 导出的 6 个头文件使用了 `#include <lvgl/lvgl.h>`，但项目通过 `-DLV_CONF_INCLUDE_SIMPLE` 编译，LVGL 头文件直接位于包含路径下，应使用 `#include "lvgl.h"`。
+
+### 涉及文件
+
+| 文件 | 修复 |
+|------|------|
+| `main/ui/styles.h` | `#include <lvgl/lvgl.h>` → `#include "lvgl.h"` |
+| `main/ui/ui.h` | 同上 |
+| `main/ui/images.h` | 同上 |
+| `main/ui/screens.h` | 同上 |
+| `main/ui/fonts.h` | 同上 |
+| `main/ui/actions.h` | 同上 |
+
+## 问题 2：`main/CMakeLists.txt` 引用空目录
+
+### 现象
+
+```
+CMake Warning: No source files found for SRC_DIRS entry 'ui/fonts'.
+```
+
+### 修复
+
+`main/CMakeLists.txt` 中移除 `ui/fonts` 的 `SRC_DIRS` 和 `INCLUDE_DIRS` 条目。
+
+## 问题 3：`create_screens()` 字体语法错误
+
+### 现象
+
+```c
+lv_theme_t *theme = lv_theme_default_init(..., LV_FONT_DEFAULTui_font_1111);
+```
+
+`LV_FONT_DEFAULT` 和 `ui_font_1111` 两个标识符被错误地连接在一起（无逗号或取地址符），这是无效 C 语法。
+
+### 修复
+
+```c
+lv_theme_t *theme = lv_theme_default_init(..., &ui_font_1111);
+```
+
+使用 `&ui_font_1111` 作为主题默认字体。
+
+## 问题 4：`screens.c` 缺少 `get_var_*()` 函数定义
+
+### 现象
+
+```
+error: implicit declaration of function 'get_var_soc'
+error: implicit declaration of function 'get_var_ready'
+...
+```
+
+### 根因
+
+EEZ Studio 导出的 `screens.c` 的 `tick_*` 函数中调用了 `get_var_soc()`、`get_var_lv()`、`get_var_ready()`、`get_var_speed()` 等 11 个 `get_var_*()` 函数，但这些函数未在任何地方定义。
+
+### 修复
+
+在 `screens.c` 顶部添加 forward declarations，并在文件末尾添加 stub 实现（返回 0 或空字符串），后续可由 CAN 数据桥接替换。
+
+## 问题 5：白屏 — PSRAM 绘图缓冲区分配失败
+
+### 现象
+
+```
+I (3454) lvgl_demo: LVGL draw buf0: 0x491c9a84, buf1: 0    ← buf1 为 NULL!
+```
+
+### 根因
+
+`lv_port_disp_init()` 试图从 PSRAM 分配 3 个大型缓冲区：
+- `lvgl_buf[0]` = 1920×1080×4 = **8MB**
+- `lvgl_buf[1]` = 1920×1080×4 = **8MB** ❌ 分配失败
+- `g_rot_buf` = 1080×1920×2 = **4MB**
+
+PSRAM 池仅 ~22MB，加上系统已有开销，第二个 8MB 连续块无法分配，`buf1=NULL` 导致 LVGL 渲染异常。
+
+### 修复 — `main/APP/lvgl_demo.c`
+
+```c
+// 改为单全屏缓冲 + full_refresh=1
+pixel_count = hor_res * ver_res;
+lvgl_buf[0] = heap_caps_malloc(pixel_count * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+lvgl_buf[1] = NULL;  // 不分配第二个缓冲区
+disp_drv.full_refresh = 1;
+```
+
+## 问题 6：白屏 — LVGL 内部堆不足导致 `lv_mem_buf_get` 死锁
+
+### 现象
+
+```
+E (244751) task_wdt:  - lvgl_timer (CPU 0/1)
+--- 0x4803394a: lv_mem_buf_get at lv_mem.c:311
+A2 : 0x00001e00    ← 请求 7680 字节 (1920×4)
+```
+
+`lvgl_timer` 任务卡在 `lv_mem_buf_get()` 超过 60 秒，触发任务看门狗。
+
+### 根因
+
+`sdkconfig` 中 `CONFIG_LV_MEM_SIZE_KILOBYTES=32`，LVGL 内部堆仅 **32KB**。渲染 1920×1080 全屏 ARGB8888 背景图时，LVGL 需要分配一行 7680 字节的临时缓冲区，32KB 堆碎片化后无法满足，`lv_mem_buf_get` 进入死锁。
+
+### 修复 — `sdkconfig`
+
+```
+# 修改前
+# CONFIG_LV_MEM_CUSTOM is not set
+CONFIG_LV_MEM_SIZE_KILOBYTES=32
+
+# 修改后
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=256
+```
+
+`CONFIG_LV_MEM_CUSTOM=y` 让 LVGL 使用系统的 `malloc/free`（可分配 PSRAM），不再受 32KB 内部堆限制。
+
+## 问题 7：`lv_scr_load_anim` 导致白屏
+
+### 现象
+
+AMI 启动屏幕使用 `lv_scr_load_anim()` 做淡入动画，但动画需要 `lv_timer_handler` 反复调用才能完成。
+
+### 修复 — `main/ui/ui.c`
+
+```c
+// 修改前
+lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+
+// 修改后
+lv_scr_load(screen);
+```
+
+直接切换屏幕，无需动画驱动。
+
+---
+
+## 当前状态（2026-07-28）
+
+| 项目 | 状态 |
+|------|------|
+| LVGL 版本 | **8.4.0** |
+| 屏幕分辨率 | **1920×1080** |
+| 显示 | AMI 启动屏（Logo 背景图）、Driver View、Autonomous 三屏 |
+| KEY1 切换 | Driver View ↔ Autonomous |
+| CAN 数据桥 | **待接入**（`get_var_*` stub 就位） |
+| 编译 | **通过** ✅ |
+| 固件大小 | ~10MB / 14MB 分区，29% 剩余 |
+| PSRAM 使用 | 1×8MB LVGL 缓冲 + 1×4MB 旋转缓冲 = 12MB |
+
+### 关键配置
+
+| 配置 | 值 | 说明 |
+|------|-----|------|
+| `CONFIG_LV_MEM_CUSTOM` | `y` | LVGL 使用系统 malloc（PSRAM） |
+| `CONFIG_LV_MEM_SIZE` | 256 KB | 内部堆安全余量 |
+| `lvgl_timer` 栈 | 8192 | 防软件渲染栈溢出 |
+| `disp_drv.full_refresh` | 1 | 全屏刷新，兼容旋转缓冲 |
+| 绘图缓冲 | 单缓冲 × 全屏 | 避免 PSRAM 不足 + 部分刷新死锁 |

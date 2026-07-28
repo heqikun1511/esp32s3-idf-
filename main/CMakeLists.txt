@@ -2,7 +2,7 @@ idf_component_register(
     SRC_DIRS 
         "."
         "APP" 
-        "ui"  
+        "ui"
         "BSP" 
     INCLUDE_DIRS 
         "."

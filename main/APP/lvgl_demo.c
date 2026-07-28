@@ -24,6 +24,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -33,6 +34,11 @@
 static bool g_need_rotate = false;
 static uint16_t *g_rot_buf = NULL;
 
+/* Forward declarations */
+void increase_lvgl_tick(void *arg);
+static bool touchpad_is_pressed(void);
+static void touchpad_get_xy(lv_coord_t *x, lv_coord_t *y);
+
 /**
  * @brief       LVGL定时器处理任务(独立任务,避免阻塞app_main)
  * @param       arg : 未使用
@@ -41,10 +47,12 @@ static uint16_t *g_rot_buf = NULL;
 static void lvgl_timer_task(void *arg)
 {
     ESP_LOGI("lvgl_demo", "LVGL timer task started");
+    esp_task_wdt_add(NULL);
 
     while (1)
     {
         lv_timer_handler();             /* LVGL计时器处理 */
+        esp_task_wdt_reset();           /* 喂狗 */
         vTaskDelay(pdMS_TO_TICKS(10));  /* 延时10毫秒 */
     }
 }
@@ -87,95 +95,104 @@ void lvgl_demo(void)
 }
 
 /**
- * @brief       初始化并注册显示设备 (LVGL v9)
+ * @brief       初始化并注册显示设备 (LVGL v8)
  * @param       无
  * @retval      lvgl显示设备指针
  */
-lv_display_t *lv_port_disp_init(void)
+lv_disp_t *lv_port_disp_init(void)
 {
-    void *lcd_buffer[2];        /* 指向屏幕双缓存 */
+    void *lvgl_buf[2];                      /* LVGL绘图缓冲区(32-bit ARGB) */
 
     /* 初始化显示设备LCD */
-    lcd_init();                /* LCD初始化 */
+    lcd_init();                             /* LCD初始化 */
 
-    /* 获取硬件帧缓冲 */
-    if (lcddev.id <= 0x7084)    /* RGB屏触摸屏 */
-    {
-        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1]));
-    }
-    else                        /* MIPI屏触摸屏 */
-    {
-        ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1])); 
-    }
-    
-    /* 创建显示设备: MIPI竖屏用逻辑横屏 + 手动旋转 + PSRAM缓冲 */
+    /* 判断是否需要旋转: MIPI竖屏用逻辑横屏 + 手动旋转 + PSRAM缓冲 */
     g_need_rotate = (lcddev.height > lcddev.width);
-    lv_display_t *disp;
+    int32_t hor_res, ver_res;
     size_t buf_size;
-    
+    size_t pixel_count;
+
     if (g_need_rotate) {
-        /* 逻辑分辨率 = 横屏 1920x1080 */
-        disp = lv_display_create(lcddev.height, lcddev.width);
-        /* PSRAM旋转缓冲区 (全屏大小, 用于旋转) */
-        if (!g_rot_buf) {
-            g_rot_buf = (uint16_t *)heap_caps_malloc(lcddev.width * lcddev.height * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-            ESP_LOGI("lvgl_demo", "Rotate bto_rgb565.c:256uffer: %p", g_rot_buf);
-        }
-        buf_size = lcddev.height * lcddev.width * sizeof(uint16_t);
-        ESP_LOGI("lvgl_demo", "MIPI portrait, logical landscape: %dx%d, FULL buf=%dKB",
-                 lcddev.height, lcddev.width, buf_size / 1024);
+        hor_res = lcddev.height;    /* 逻辑横屏 1920 */
+        ver_res = lcddev.width;     /* 逻辑横屏 1080 */
     } else {
-        disp = lv_display_create(lcddev.width, lcddev.height);
-        buf_size = lcddev.width * lcddev.height * sizeof(uint16_t);
-        ESP_LOGI("lvgl_demo", "RGB landscape: %dx%d, FULL buf=%dKB",
-                 lcddev.width, lcddev.height, buf_size / 1024);
+        hor_res = lcddev.width;
+        ver_res = lcddev.height;
     }
-    
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
-    lv_display_set_flush_cb(disp, lvgl_disp_flush_cb);
-    lv_display_set_user_data(disp, lcddev.lcd_panel_handle);
-    /* FULL模式: 全屏渲染, 配合硬件双缓冲, 无变化时不刷新 */
-    lv_display_set_buffers(disp, lcd_buffer[0], lcd_buffer[1], buf_size, LV_DISPLAY_RENDER_MODE_FULL);
-    
-    return disp;                    
+
+    /* 全屏刷新 + 单缓冲: 避免部分刷新时临时缓冲区池耗尽导致死锁 */
+    pixel_count = hor_res * ver_res;        /* 全屏像素数 */
+    buf_size = pixel_count * sizeof(uint32_t);
+    lvgl_buf[0] = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    lvgl_buf[1] = NULL;                     /* 单缓冲, 不分配第二个 */
+    ESP_LOGI("lvgl_demo", "LVGL draw buf: %p, size=%dKB (%dx%d)",
+             lvgl_buf[0], buf_size / 1024, hor_res, ver_res);
+
+    if (!lvgl_buf[0]) {
+        ESP_LOGE("lvgl_demo", "Failed to allocate LVGL draw buffer!");
+        return NULL;
+    }
+
+    /* 旋转缓冲区: 全屏 RGB565 */
+    if (!g_rot_buf) {
+        g_rot_buf = (uint16_t *)heap_caps_malloc(lcddev.width * lcddev.height * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        ESP_LOGI("lvgl_demo", "Rotate buffer: %p", g_rot_buf);
+    }
+    if (!g_rot_buf) {
+        ESP_LOGE("lvgl_demo", "Failed to allocate rotate buffer!");
+        return NULL;
+    }
+
+    /* 创建LVGL显示设备 (LVGL v8) */
+    static lv_disp_draw_buf_t draw_buf;
+    static lv_disp_drv_t disp_drv;
+
+    lv_disp_draw_buf_init(&draw_buf, lvgl_buf[0], lvgl_buf[1], pixel_count);
+
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = hor_res;
+    disp_drv.ver_res = ver_res;
+    disp_drv.flush_cb = lvgl_disp_flush_cb;
+    disp_drv.draw_buf = &draw_buf;
+    disp_drv.user_data = lcddev.lcd_panel_handle;
+    disp_drv.full_refresh = 1;
+
+    return lv_disp_drv_register(&disp_drv);
 }
 
 /**
- * @brief       初始化并注册输入设备 (LVGL v9)
+ * @brief       初始化并注册输入设备 (LVGL v8)
  * @param       无
  * @retval      lvgl输入设备指针
  */
 lv_indev_t *lv_port_indev_init(void)
 {
+    static lv_indev_drv_t indev_drv;
+
     /* 初始化触摸屏 */
     tp_dev.init();
 
-    /* 创建输入设备 */
-    lv_indev_t *indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, touchpad_read);
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = touchpad_read;
 
-    return indev;
+    return lv_indev_drv_register(&indev_drv);
 }
 
 /**
-* @brief        将内部缓冲区的内容刷新到显示屏上的特定区域 (LVGL v9)
-* @note         LVGL v9使用lv_display_set_rotation自动旋转，flush_cb收到的已经是正确方向的像素
-* @param        disp : 显示设备
+* @brief        将内部缓冲区的内容刷新到显示屏上的特定区域 (LVGL v8)
+* @param        disp_drv : 显示设备驱动
 * @param        area : 要刷新的区域
-* @param        px_map : 像素数据 (uint8_t*)
+* @param        color_p : 像素数据
 * @retval       无
 */
-void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+void lvgl_disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)disp_drv->user_data;
+    uint32_t *px32 = (uint32_t *)color_p;    /* LVGL 32-bit ARGB8888 */
 
     if (g_need_rotate) {
-        /* 手动旋转: 逻辑横屏(1920x1080) → 物理竖屏(1080x1920)
-         * FULL模式: area = 全屏, 旋转整个缓冲区后刷新整个物理屏
-         */
-        uint16_t *src = (uint16_t *)px_map;
-        lv_coord_t logical_total_w = lv_display_get_horizontal_resolution(disp);
+        lv_coord_t logical_total_w = disp_drv->hor_res;
         lv_coord_t logical_w = lv_area_get_width(area);
         lv_coord_t phys_w = lcddev.width;
         lv_coord_t phys_h = lcddev.height;
@@ -185,18 +202,38 @@ void lvgl_disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
                 lv_coord_t px = ly;
                 lv_coord_t py = logical_total_w - 1 - lx;
                 if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
-                    g_rot_buf[py * phys_w + px] = src[(ly - area->y1) * logical_w + (lx - area->x1)];
+                    uint32_t argb = px32[(ly - area->y1) * logical_w + (lx - area->x1)];
+                    uint8_t r = (argb >> 16) & 0xFF;
+                    uint8_t g_comp = (argb >> 8) & 0xFF;
+                    uint8_t b = argb & 0xFF;
+                    uint16_t rgb565 = ((r >> 3) << 11) | ((g_comp >> 2) << 5) | (b >> 3);
+                    g_rot_buf[py * phys_w + px] = rgb565;
                 }
             }
         }
-        /* FULL模式: 刷新整个物理屏幕 */
         esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, phys_w, phys_h, (uint8_t *)g_rot_buf);
     } else {
-        /* 非旋转: 只刷新变化的区域 */
+        lv_coord_t area_w = lv_area_get_width(area);
+        lv_coord_t area_h = lv_area_get_height(area);
+        size_t pixel_cnt = area_w * area_h;
+        if (!g_rot_buf || pixel_cnt > (size_t)(lcddev.width * lcddev.height)) {
+            if (!g_rot_buf)
+                g_rot_buf = (uint16_t *)heap_caps_malloc(lcddev.width * lcddev.height * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        }
+        for (lv_coord_t y = 0; y < area_h; y++) {
+            for (lv_coord_t x = 0; x < area_w; x++) {
+                uint32_t argb = px32[y * area_w + x];
+                uint8_t r = (argb >> 16) & 0xFF;
+                uint8_t g_comp = (argb >> 8) & 0xFF;
+                uint8_t b = argb & 0xFF;
+                uint16_t rgb565 = ((r >> 3) << 11) | ((g_comp >> 2) << 5) | (b >> 3);
+                g_rot_buf[y * area_w + x] = rgb565;
+            }
+        }
         esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1,
-                                  area->x2 + 1, area->y2 + 1, px_map);
+                                  area->x2 + 1, area->y2 + 1, (uint8_t *)g_rot_buf);
     }
-    lv_display_flush_ready(disp);
+    lv_disp_flush_ready(disp_drv);
 }
 
 /**
@@ -257,7 +294,7 @@ static void touchpad_get_xy(lv_coord_t *x, lv_coord_t *y)
  * @param       data        : 输入设备数据结构体
  * @retval      无
  */
-void touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
+void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 {
     static lv_coord_t last_x = 0;
     static lv_coord_t last_y = 0;
