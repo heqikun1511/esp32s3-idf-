@@ -4417,7 +4417,7 @@ CONFIG_LV_USE_SNAPSHOT=y
 # Examples
 #
 # default:
-CONFIG_LV_BUILD_EXAMPLES=y
+# CONFIG_LV_BUILD_EXAMPLES is not set
 # end of Examples
 
 #
