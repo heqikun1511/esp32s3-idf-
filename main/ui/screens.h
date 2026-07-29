@@ -21,6 +21,12 @@ typedef struct _objects_t {
     lv_obj_t *ami;
     lv_obj_t *autonomous;
     lv_obj_t *driver_view;
+    lv_obj_t *youren;
+    lv_obj_t *line_acc;
+    lv_obj_t *eight;
+    lv_obj_t *high_foll;
+    lv_obj_t *ebs;
+    lv_obj_t *cherck;
     lv_obj_t *obj0;
     lv_obj_t *bfp_bar;
     lv_obj_t *lv_bar_1;

@@ -15,7 +15,6 @@
 
 int32_t get_var_soc(void);
 int32_t get_var_lv(void);
-const char *get_var_ready(void);
 const char *get_var_temp_motor(void);
 const char *get_var_temp_inv(void);
 const char *get_var_speed(void);
@@ -23,7 +22,6 @@ int32_t get_var_brake_pedal_pressure(void);
 int32_t get_var_accell_pedal_pressure(void);
 const char *get_var_soc_____(void);
 const char *get_var_lv___v_(void);
-const char *get_var__mission__(void);
 
 objects_t objects;
 
@@ -43,6 +41,63 @@ void create_screen_ami() {
     lv_obj_set_pos(obj, 0, 0);
     lv_obj_set_size(obj, 1920, 1080);
     lv_obj_set_style_bg_img_src(obj, &img_logo, LV_PART_MAIN | LV_STATE_DEFAULT);
+    {
+        lv_obj_t *parent_obj = obj;
+        {
+            // youren
+            lv_obj_t *obj = lv_led_create(parent_obj);
+            objects.youren = obj;
+            lv_obj_set_pos(obj, 742, 329);
+            lv_obj_set_size(obj, 60, 51);
+            lv_led_set_color(obj, lv_color_hex(0x09cd4c));
+            lv_led_set_brightness(obj, 255);
+        }
+        {
+            // line_acc
+            lv_obj_t *obj = lv_led_create(parent_obj);
+            objects.line_acc = obj;
+            lv_obj_set_pos(obj, 1107, 330);
+            lv_obj_set_size(obj, 60, 51);
+            lv_led_set_color(obj, lv_color_hex(0x09cd4c));
+            lv_led_set_brightness(obj, 255);
+        }
+        {
+            // eight
+            lv_obj_t *obj = lv_led_create(parent_obj);
+            objects.eight = obj;
+            lv_obj_set_pos(obj, 1293, 659);
+            lv_obj_set_size(obj, 60, 51);
+            lv_led_set_color(obj, lv_color_hex(0x09cd4c));
+            lv_led_set_brightness(obj, 255);
+        }
+        {
+            // high_foll
+            lv_obj_t *obj = lv_led_create(parent_obj);
+            objects.high_foll = obj;
+            lv_obj_set_pos(obj, 1118, 961);
+            lv_obj_set_size(obj, 60, 51);
+            lv_led_set_color(obj, lv_color_hex(0x09cd4c));
+            lv_led_set_brightness(obj, 255);
+        }
+        {
+            // EBS
+            lv_obj_t *obj = lv_led_create(parent_obj);
+            objects.ebs = obj;
+            lv_obj_set_pos(obj, 752, 961);
+            lv_obj_set_size(obj, 60, 51);
+            lv_led_set_color(obj, lv_color_hex(0x09cd4c));
+            lv_led_set_brightness(obj, 255);
+        }
+        {
+            // cherck
+            lv_obj_t *obj = lv_led_create(parent_obj);
+            objects.cherck = obj;
+            lv_obj_set_pos(obj, 580, 659);
+            lv_obj_set_size(obj, 60, 51);
+            lv_led_set_color(obj, lv_color_hex(0x09cd4c));
+            lv_led_set_brightness(obj, 255);
+        }
+    }
     
     tick_screen_ami();
 }
@@ -909,14 +964,14 @@ void create_screen_driver_view() {
             lv_obj_set_style_text_color(obj, lv_color_hex(0x3fff00), LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_align(obj, LV_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_50, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_label_set_text(obj, "");
+            lv_label_set_text_static(obj, "ready");
         }
         {
             // middleContainer
             lv_obj_t *obj = lv_obj_create(parent_obj);
             objects.middle_container = obj;
             lv_obj_set_pos(obj, 301, 176);
-            lv_obj_set_size(obj, 1318, 695);
+            lv_obj_set_size(obj, 1343, 783);
             add_style_info_containers(obj);
             lv_obj_set_style_radius(obj, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_pad_left(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -931,8 +986,8 @@ void create_screen_driver_view() {
                     // tempMotorContainer
                     lv_obj_t *obj = lv_obj_create(parent_obj);
                     objects.temp_motor_container = obj;
-                    lv_obj_set_pos(obj, 980, 290);
-                    lv_obj_set_size(obj, 164, 103);
+                    lv_obj_set_pos(obj, 980, 245);
+                    lv_obj_set_size(obj, 215, 148);
                     add_style_info_containers(obj);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_border_width(obj, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -949,7 +1004,7 @@ void create_screen_driver_view() {
                             // tempmotorLabel
                             lv_obj_t *obj = lv_label_create(parent_obj);
                             objects.tempmotor_label = obj;
-                            lv_obj_set_pos(obj, 10, 22);
+                            lv_obj_set_pos(obj, 42, 37);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             add_style_text(obj);
                             lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_30, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -960,6 +1015,7 @@ void create_screen_driver_view() {
                             lv_obj_set_pos(obj, 10, -15);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             add_style_text(obj);
+                            lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_30, LV_PART_MAIN | LV_STATE_DEFAULT);
                             lv_label_set_text_static(obj, "Temp Motor");
                         }
                     }
@@ -968,7 +1024,7 @@ void create_screen_driver_view() {
                     // lapTimesContainer
                     lv_obj_t *obj = lv_obj_create(parent_obj);
                     objects.lap_times_container = obj;
-                    lv_obj_set_pos(obj, 234, 481);
+                    lv_obj_set_pos(obj, 229, 418);
                     lv_obj_set_size(obj, 663, 141);
                     add_style_info_containers(obj);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1035,8 +1091,8 @@ void create_screen_driver_view() {
                     // tempInvContainer
                     lv_obj_t *obj = lv_obj_create(parent_obj);
                     objects.temp_inv_container = obj;
-                    lv_obj_set_pos(obj, 980, 181);
-                    lv_obj_set_size(obj, 155, 88);
+                    lv_obj_set_pos(obj, 980, 58);
+                    lv_obj_set_size(obj, 211, 141);
                     add_style_info_containers(obj);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_border_width(obj, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1053,7 +1109,7 @@ void create_screen_driver_view() {
                             // tempInvLabel
                             lv_obj_t *obj = lv_label_create(parent_obj);
                             objects.temp_inv_label = obj;
-                            lv_obj_set_pos(obj, 12, 17);
+                            lv_obj_set_pos(obj, 41, 32);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             add_style_text(obj);
                             lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_30, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1061,9 +1117,10 @@ void create_screen_driver_view() {
                         }
                         {
                             lv_obj_t *obj = lv_label_create(parent_obj);
-                            lv_obj_set_pos(obj, 20, -15);
+                            lv_obj_set_pos(obj, 23, -6);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             add_style_text(obj);
+                            lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_30, LV_PART_MAIN | LV_STATE_DEFAULT);
                             lv_label_set_text_static(obj, "Temp INV");
                         }
                     }
@@ -1136,7 +1193,7 @@ void create_screen_driver_view() {
                     lv_obj_t *obj = lv_obj_create(parent_obj);
                     objects.brake_acell_presure_container = obj;
                     lv_obj_set_pos(obj, 978, 418);
-                    lv_obj_set_size(obj, 255, 267);
+                    lv_obj_set_size(obj, 321, 348);
                     add_style_info_containers(obj);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_border_width(obj, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1160,8 +1217,8 @@ void create_screen_driver_view() {
                             // brakePresureBar
                             lv_obj_t *obj = lv_bar_create(parent_obj);
                             objects.brake_presure_bar = obj;
-                            lv_obj_set_pos(obj, 82, 8);
-                            lv_obj_set_size(obj, 24, 195);
+                            lv_obj_set_pos(obj, 72, 8);
+                            lv_obj_set_size(obj, 34, 287);
                             lv_bar_set_mode(obj, LV_BAR_MODE_RANGE);
                             lv_bar_set_value(obj, 0, LV_ANIM_ON);
                             lv_bar_set_start_value(obj, 0, LV_ANIM_ON);
@@ -1175,7 +1232,7 @@ void create_screen_driver_view() {
                             lv_obj_t *obj = lv_bar_create(parent_obj);
                             objects.accellerator_presure_bar = obj;
                             lv_obj_set_pos(obj, 176, 8);
-                            lv_obj_set_size(obj, 24, 195);
+                            lv_obj_set_size(obj, 39, 287);
                             lv_bar_set_mode(obj, LV_BAR_MODE_RANGE);
                             lv_bar_set_value(obj, 0, LV_ANIM_ON);
                             lv_bar_set_start_value(obj, 0, LV_ANIM_ON);
@@ -1194,9 +1251,7 @@ void create_screen_driver_view() {
             objects.hv_bar = obj;
             lv_obj_set_pos(obj, 1715, 137);
             lv_obj_set_size(obj, 130, 734);
-            lv_bar_set_mode(obj, LV_BAR_MODE_RANGE);
-            lv_bar_set_value(obj, 0, LV_ANIM_ON);
-            lv_bar_set_start_value(obj, 0, LV_ANIM_ON);
+            lv_bar_set_value(obj, 50, LV_ANIM_ON);
             add_style_bar(obj);
             lv_obj_set_style_bg_color(obj, lv_color_hex(0xfb0000), LV_PART_INDICATOR | LV_STATE_DEFAULT);
             lv_obj_set_style_line_width(obj, 10, LV_PART_INDICATOR | LV_STATE_DEFAULT);
@@ -1252,13 +1307,13 @@ void create_screen_driver_view() {
         {
             lv_obj_t *obj = lv_label_create(parent_obj);
             objects.obj15 = obj;
-            lv_obj_set_pos(obj, 776, 798);
+            lv_obj_set_pos(obj, 594, 733);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             add_style_text(obj);
             lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_color(obj, lv_color_hex(0x13ff00), LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_40, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_label_set_text(obj, "");
+            lv_obj_set_style_text_font(obj, &ui_font_orbiter_bold_100, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text_static(obj, "\"MISSION:\"");
         }
         {
             lv_obj_t *obj = lv_label_create(parent_obj);
@@ -1302,7 +1357,7 @@ void create_screen_driver_view() {
         {
             lv_obj_t *obj = lv_label_create(parent_obj);
             objects.obj18 = obj;
-            lv_obj_set_pos(obj, 1067, 715);
+            lv_obj_set_pos(obj, 1052, 648);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             add_style_text(obj);
             lv_obj_set_style_text_color(obj, lv_color_hex(0xfefefe), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1312,7 +1367,7 @@ void create_screen_driver_view() {
         {
             lv_obj_t *obj = lv_label_create(parent_obj);
             objects.obj19 = obj;
-            lv_obj_set_pos(obj, 803, 715);
+            lv_obj_set_pos(obj, 797, 642);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             add_style_text(obj);
             lv_obj_set_style_text_color(obj, lv_color_hex(0xff0000), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -1408,15 +1463,6 @@ void create_screen_driver_view() {
 
 void tick_screen_driver_view() {
     {
-        const char *new_val = get_var_ready();
-        const char *cur_val = lv_label_get_text(objects.ready_label);
-        if (strcmp(new_val, cur_val) != 0) {
-            tick_value_change_obj = objects.ready_label;
-            lv_label_set_text(objects.ready_label, new_val);
-            tick_value_change_obj = NULL;
-        }
-    }
-    {
         const char *new_val = get_var_temp_motor();
         const char *cur_val = lv_label_get_text(objects.tempmotor_label);
         if (strcmp(new_val, cur_val) != 0) {
@@ -1462,15 +1508,6 @@ void tick_screen_driver_view() {
         }
     }
     {
-        int32_t new_val = get_var_soc();
-        int32_t cur_val = lv_bar_get_value(objects.hv_bar);
-        if (new_val != cur_val) {
-            tick_value_change_obj = objects.hv_bar;
-            lv_bar_set_value(objects.hv_bar, new_val, LV_ANIM_ON);
-            tick_value_change_obj = NULL;
-        }
-    }
-    {
         int32_t new_val = get_var_lv();
         int32_t cur_val = lv_bar_get_value(objects.lv_bar);
         if (new_val != cur_val) {
@@ -1498,15 +1535,6 @@ void tick_screen_driver_view() {
         }
     }
     {
-        const char *new_val = get_var__mission__();
-        const char *cur_val = lv_label_get_text(objects.obj15);
-        if (strcmp(new_val, cur_val) != 0) {
-            tick_value_change_obj = objects.obj15;
-            lv_label_set_text(objects.obj15, new_val);
-            tick_value_change_obj = NULL;
-        }
-    }
-    {
         int32_t new_val = get_var_soc();
         int32_t cur_val = lv_bar_get_value(objects.hv_bar_2);
         if (new_val != cur_val) {
@@ -1530,54 +1558,6 @@ void tick_screen(int screen_index) {
 }
 void tick_screen_by_id(enum ScreensEnum screenId) {
     tick_screen(screenId - 1);
-}
-
-//
-// get_var stubs — these will be replaced with actual CAN data bridge
-//
-
-int32_t get_var_soc(void) {
-    return 0;
-}
-
-int32_t get_var_lv(void) {
-    return 0;
-}
-
-const char *get_var_ready(void) {
-    return "";
-}
-
-const char *get_var_temp_motor(void) {
-    return "";
-}
-
-const char *get_var_temp_inv(void) {
-    return "";
-}
-
-const char *get_var_speed(void) {
-    return "";
-}
-
-int32_t get_var_brake_pedal_pressure(void) {
-    return 0;
-}
-
-int32_t get_var_accell_pedal_pressure(void) {
-    return 0;
-}
-
-const char *get_var_soc_____(void) {
-    return "";
-}
-
-const char *get_var_lv___v_(void) {
-    return "";
-}
-
-const char *get_var__mission__(void) {
-    return "";
 }
 
 //
@@ -1659,6 +1639,20 @@ ext_font_desc_t fonts[] = {
     { "MONTSERRAT_48", &lv_font_montserrat_48 },
 #endif
 };
+
+//
+// get_var stubs — will be replaced with actual CAN data bridge
+//
+
+int32_t get_var_soc(void) { return 0; }
+int32_t get_var_lv(void) { return 0; }
+const char *get_var_temp_motor(void) { return ""; }
+const char *get_var_temp_inv(void) { return ""; }
+const char *get_var_speed(void) { return ""; }
+int32_t get_var_brake_pedal_pressure(void) { return 0; }
+int32_t get_var_accell_pedal_pressure(void) { return 0; }
+const char *get_var_soc_____(void) { return ""; }
+const char *get_var_lv___v_(void) { return ""; }
 
 //
 // Color themes
