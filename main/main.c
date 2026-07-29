@@ -41,6 +41,79 @@ static SemaphoreHandle_t g_rpm_mutex = NULL;
 /* KEY1引脚定义 (BOOT按键, 低电平有效) */
 #define KEY1_GPIO_PIN   GPIO_NUM_35
 
+/* KEY0引脚定义 (EXIO8 - 外部IO扩展器引脚8, 用户根据硬件调整) */
+#define KEY0_GPIO_PIN   GPIO_NUM_0
+
+/*
+ * 任务选择 (Mission Selection)
+ * 对应 AMI 屏幕上的六边形布局
+ */
+#define MISSION_COUNT 6
+
+static const char *mission_names[MISSION_COUNT] = {
+    "车辆任务",     /* cherck - 0 */
+    "有人驾驶",     /* youren - 1 (初始选中) */
+    "直线加速",     /* line_acc - 2 */
+    "八字绕杆",     /* eight - 3 */
+    "高速循迹",     /* high_foll - 4 */
+    "EBS测试",      /* ebs - 5 */
+};
+
+/* 当前选中的任务索引 (初始为1=有人驾驶) */
+static uint8_t current_mission = 1;
+
+/*
+ * 将LED数组索引映射到screens.h中的objects_t成员
+ * 顺序必须与mission_names一致
+ */
+static lv_obj_t **mission_leds[MISSION_COUNT] = {
+    &objects.cherck,     /* 0: 车辆任务 */
+    &objects.youren,     /* 1: 有人驾驶 */
+    &objects.line_acc,   /* 2: 直线加速 */
+    &objects.eight,      /* 3: 八字绕杆 */
+    &objects.high_foll,  /* 4: 高速循迹 */
+    &objects.ebs,        /* 5: EBS测试 */
+};
+
+/** 更新所有任务LED：选中=红色，未选中=绿色 */
+static void update_mission_leds(void)
+{
+    for (int i = 0; i < MISSION_COUNT; i++) {
+        lv_obj_t *led = *mission_leds[i];
+        if (!led) continue;
+        if (i == current_mission) {
+            lv_led_set_color(led, lv_color_hex(0xff0000));  /* 红色: 选中 */
+        } else {
+            lv_led_set_color(led, lv_color_hex(0x09cd4c));  /* 绿色: 未选中 */
+        }
+    }
+}
+
+/** 切换到下一个任务 (循环) */
+static void next_mission(void)
+{
+    current_mission = (current_mission + 1) % MISSION_COUNT;
+    ESP_LOGI(TAG, "Mission selected: %s [%d/%d]",
+             mission_names[current_mission], current_mission + 1, MISSION_COUNT);
+    update_mission_leds();
+}
+
+/** 确认当前任务, 跳转到DriverView并设置MISSION标签 */
+static void confirm_mission(void)
+{
+    ESP_LOGI(TAG, "Mission confirmed: %s", mission_names[current_mission]);
+
+    /* 更新DriverView上的MISSION标签 (obj15) */
+    if (objects.obj15) {
+        char mission_buf[32];
+        snprintf(mission_buf, sizeof(mission_buf), "\"MISSION: %s\"", mission_names[current_mission]);
+        lv_label_set_text(objects.obj15, mission_buf);
+    }
+
+    /* 跳转到DriverView */
+    lv_disp_load_scr(objects.driver_view);
+}
+
 /* CAN TX引脚 (根据实际硬件修改) */
 #define CAN_TX_PIN  GPIO_NUM_27
 /* CAN RX引脚 (根据实际硬件修改) */
@@ -98,20 +171,13 @@ static void ui_update_task(void *arg)
     int last_rpm = -1;
     int last_speed = -1;    /* 用于车速显示(0-120) */
     char buf[16];
-    uint8_t key1_last = 1;          /* KEY1上次状态 (1=松开) */
-    uint8_t current_screen_idx = 0; /* 当前屏幕索引 (0~1) */
-    lv_obj_t * screen_list[] = {
-        objects.driver_view,
-        objects.autonomous
-    };
-    const char * screen_names[] = {
-        "DriverView",
-        "Autonomous"
-    };
-    const uint8_t screen_count = sizeof(screen_list) / sizeof(screen_list[0]);
-    uint32_t debug_tick = 0;        /* 调试日志计时 */
+    uint8_t boot_last = 1;          /* BOOT按键上次状态 (1=松开) */
+    uint8_t key0_last = 1;          /* KEY0上次状态 (1=松开) */
 
     ESP_LOGI(TAG, "UI update task started");
+
+    /* 初始选中 "有人驾驶" */
+    update_mission_leds();
 
     while (1)
     {
@@ -130,7 +196,7 @@ static void ui_update_task(void *arg)
         {
             last_rpm = current_rpm;
 
-            /* 更新车速显示 (将转速按比例映射到0-120范围, 可根据实际调整) */
+            /* 更新车速显示 (将转速按比例映射到0-120范围) */
             int speed_val = (abs(current_rpm) * 120) / 10000;
             if (speed_val > 120) speed_val = 120;
 
@@ -138,7 +204,6 @@ static void ui_update_task(void *arg)
             {
                 last_speed = speed_val;
 
-                /* 更新EEZ车速标签 */
                 if (objects.speed_label)
                 {
                     snprintf(buf, sizeof(buf), "%03d", speed_val);
@@ -147,44 +212,53 @@ static void ui_update_task(void *arg)
             }
         }
 
-        /* === KEY1 按键扫描 (低电平有效, 简单消抖) === */
-        uint8_t key1_val = gpio_get_level(KEY1_GPIO_PIN);
-        static uint8_t key1_debounce_cnt = 0;
+        /* === 检测当前显示的屏幕 === */
+        lv_obj_t *active_scr = lv_scr_act();
 
-        /* 连续采样: 5次中至少4次一致才判定为有效 */
-        if (key1_val == 0) {
-            if (key1_debounce_cnt < 5) key1_debounce_cnt++;
-        } else {
-            if (key1_debounce_cnt > 0) key1_debounce_cnt--;
-        }
-
-        uint8_t key1_curr = (key1_debounce_cnt >= 4) ? 0 : 1;
-
-        /* 下降沿检测 (按下) */
-        if (key1_last == 1 && key1_curr == 0)
+        /* === BOOT按键 (GPIO35) 扫描 === */
         {
-            ESP_LOGI(TAG, "KEY1 pressed! (raw=%d, debounce=%d)", key1_val, key1_debounce_cnt);
+            uint8_t val = gpio_get_level(KEY1_GPIO_PIN);
+            static uint8_t debounce_cnt = 0;
+            if (val == 0) { if (debounce_cnt < 5) debounce_cnt++; }
+            else          { if (debounce_cnt > 0) debounce_cnt--; }
+            uint8_t curr = (debounce_cnt >= 4) ? 0 : 1;
 
-            /* 切换到下一个屏幕 (循环) */
-            current_screen_idx = (current_screen_idx + 1) % screen_count;
-            ESP_LOGI(TAG, "Switching to %s [%d/%d]",
-                     screen_names[current_screen_idx],
-                     current_screen_idx + 1, screen_count);
-            lv_disp_load_scr(screen_list[current_screen_idx]);
+            if (boot_last == 1 && curr == 0)
+            {
+                ESP_LOGI(TAG, "BOOT pressed");
+
+                if (active_scr == objects.ami) {
+                    /* AMI屏幕: 切换任务 */
+                    next_mission();
+                } else if (active_scr == objects.driver_view) {
+                    /* DriverView: 返回任务选择 */
+                    lv_disp_load_scr(objects.ami);
+                }
+            }
+            boot_last = curr;
         }
-        key1_last = key1_curr;
 
-        /* 每5秒打印一次按键状态用于调试 */
-        debug_tick++;
-        if (debug_tick >= 250)  /* 5秒 = 250 * 20ms */
+        /* === KEY0 (EXIO8) 扫描 === */
         {
-            debug_tick = 0;
-            ESP_LOGI(TAG, "KEY1 state: raw=%d, debounce=%d, stable=%s",
-                     gpio_get_level(KEY1_GPIO_PIN), key1_debounce_cnt,
-                     key1_curr == 0 ? "PRESSED" : "RELEASED");
+            uint8_t val = gpio_get_level(KEY0_GPIO_PIN);
+            static uint8_t debounce_cnt = 0;
+            if (val == 0) { if (debounce_cnt < 5) debounce_cnt++; }
+            else          { if (debounce_cnt > 0) debounce_cnt--; }
+            uint8_t curr = (debounce_cnt >= 4) ? 0 : 1;
+
+            if (key0_last == 1 && curr == 0)
+            {
+                ESP_LOGI(TAG, "KEY0 pressed");
+
+                if (active_scr == objects.ami) {
+                    /* AMI屏幕: 确认当前任务, 跳转到DriverView */
+                    confirm_mission();
+                }
+            }
+            key0_last = curr;
         }
 
-        /* 每20ms检查一次 (兼顾按键响应和CPU占用) */
+        /* 每20ms检查一次 */
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -213,7 +287,7 @@ void app_main(void)
     /* 初始化LVGL显示 */
     lvgl_demo();                /* 运行LVGL例程 */
 
-    /* 初始化KEY1 (BOOT按键, GPIO0, 上拉输入) */
+    /* 初始化KEY1 (BOOT按键, GPIO35, 上拉输入) */
     gpio_config_t key1_cfg = {
         .pin_bit_mask = 1ULL << KEY1_GPIO_PIN,
         .mode = GPIO_MODE_INPUT,
@@ -223,6 +297,17 @@ void app_main(void)
     };
     gpio_config(&key1_cfg);
     ESP_LOGI(TAG, "KEY1 initialized on GPIO%d", KEY1_GPIO_PIN);
+
+    /* 初始化KEY0 (EXIO8, 上拉输入) */
+    gpio_config_t key0_cfg = {
+        .pin_bit_mask = 1ULL << KEY0_GPIO_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&key0_cfg);
+    ESP_LOGI(TAG, "KEY0 initialized on GPIO%d (EXIO8)", KEY0_GPIO_PIN);
 
     /* 初始化CAN (TWAI) */
     ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);
