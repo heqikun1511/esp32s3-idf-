@@ -1,21 +1,4 @@
-/**
- ******************************************************************************
- * @file        main.c
- * @author      正点原子团队(ALIENTEK)
- * @version     V1.0
- * @date        2025-01-01
- * @brief       LVGL V8移植 实验
- * @license     Copyright (c) 2020-2032, 广州市星翼电子科技有限公司
- ******************************************************************************
- * @attention
- * 
- * 实验平台:正点原子 ESP32-P4 开发板
- * 在线视频:www.yuanzige.com
- * 技术论坛:www.openedv.com
- * 公司网址:www.alientek.com
- * 购买地址:openedv.taobao.com
- ******************************************************************************
- */
+
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -29,6 +12,8 @@
 #include "lvgl.h"
 #include "lvgl_demo.h"
 #include "bsp_can.h"
+#include "myiic.h"
+#include "xl9555.h"
 #include "ui.h"
 
 static const char *TAG = "MAIN";
@@ -38,11 +23,11 @@ static volatile int g_current_rpm = 0;
 /* 互斥信号量, 保护转速数据 */
 static SemaphoreHandle_t g_rpm_mutex = NULL;
 
-/* KEY1引脚定义 (BOOT按键, 低电平有效) */
-#define KEY1_GPIO_PIN   GPIO_NUM_35
+/* BOOT按键 (物理BOOT键, 直接GPIO, 低电平有效) */
+#define BOOT_GPIO_PIN   GPIO_NUM_35
 
-/* KEY0引脚定义 (EXIO8 - 外部IO扩展器引脚8, 用户根据硬件调整) */
-#define KEY0_GPIO_PIN   GPIO_NUM_0
+/* KEY0和KEY1通过XL9555 IO扩展器连接 (见原理图) */
+/* KEY0 = EXIO8 (IO1_0), KEY1 = EXIO7 (IO0_7) */
 
 /*
  * 任务选择 (Mission Selection)
@@ -171,8 +156,8 @@ static void ui_update_task(void *arg)
     int last_rpm = -1;
     int last_speed = -1;    /* 用于车速显示(0-120) */
     char buf[16];
-    uint8_t boot_last = 1;          /* BOOT按键上次状态 (1=松开) */
-    uint8_t key0_last = 1;          /* KEY0上次状态 (1=松开) */
+    uint8_t boot_last = 1;          /* BOOT按键 (GPIO35) 上次状态 */
+    uint8_t key1_last = 1;          /* KEY1 (EXIO7) 上次状态 */
 
     ESP_LOGI(TAG, "UI update task started");
 
@@ -215,9 +200,9 @@ static void ui_update_task(void *arg)
         /* === 检测当前显示的屏幕 === */
         lv_obj_t *active_scr = lv_scr_act();
 
-        /* === BOOT按键 (GPIO35) 扫描 === */
+        /* === BOOT按键 (GPIO35, 物理BOOT键) 扫描 === */
         {
-            uint8_t val = gpio_get_level(KEY1_GPIO_PIN);
+            uint8_t val = gpio_get_level(BOOT_GPIO_PIN);
             static uint8_t debounce_cnt = 0;
             if (val == 0) { if (debounce_cnt < 5) debounce_cnt++; }
             else          { if (debounce_cnt > 0) debounce_cnt--; }
@@ -228,34 +213,37 @@ static void ui_update_task(void *arg)
                 ESP_LOGI(TAG, "BOOT pressed");
 
                 if (active_scr == objects.ami) {
-                    /* AMI屏幕: 切换任务 */
-                    next_mission();
-                } else if (active_scr == objects.driver_view) {
-                    /* DriverView: 返回任务选择 */
+                    /* AMI → AUTONOMOUS */
+                    lv_disp_load_scr(objects.autonomous);
+                } else if (active_scr == objects.autonomous) {
+                    /* AUTONOMOUS → DRIVER_VIEW */
+                    lv_disp_load_scr(objects.driver_view);
+                } else {
+                    /* DRIVER_VIEW (或其它) → AMI */
                     lv_disp_load_scr(objects.ami);
                 }
             }
             boot_last = curr;
         }
 
-        /* === KEY0 (EXIO8) 扫描 === */
+        /* === KEY1 (EXIO7, XL9555) 扫描 — 确认任务进入DriverView === */
         {
-            uint8_t val = gpio_get_level(KEY0_GPIO_PIN);
+            uint8_t val = xl9555_key1_read();
             static uint8_t debounce_cnt = 0;
             if (val == 0) { if (debounce_cnt < 5) debounce_cnt++; }
             else          { if (debounce_cnt > 0) debounce_cnt--; }
             uint8_t curr = (debounce_cnt >= 4) ? 0 : 1;
 
-            if (key0_last == 1 && curr == 0)
+            if (key1_last == 1 && curr == 0)
             {
-                ESP_LOGI(TAG, "KEY0 pressed");
+                ESP_LOGI(TAG, "KEY1 pressed (EXIO7) - confirm mission");
 
                 if (active_scr == objects.ami) {
                     /* AMI屏幕: 确认当前任务, 跳转到DriverView */
                     confirm_mission();
                 }
             }
-            key0_last = curr;
+            key1_last = curr;
         }
 
         /* 每20ms检查一次 */
@@ -284,30 +272,35 @@ void app_main(void)
     g_rpm_mutex = xSemaphoreCreateMutex();
     assert(g_rpm_mutex);
 
+    /* 初始化I2C总线 (XL9555 IO扩展器使用) */
+    ret = myiic_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C init failed!");
+    } else {
+        ESP_LOGI(TAG, "I2C initialized (SCL=32, SDA=33)");
+    }
+
+    /* 初始化XL9555 IO扩展器 (KEY0=EXIO8, KEY1=EXIO7) */
+    ret = xl9555_init(bus_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "XL9555 init failed! KEY1 will not work!");
+    } else {
+        ESP_LOGI(TAG, "XL9555 initialized (KEY1=EXIO7, KEY0=EXIO8)");
+    }
+
+    /* 初始化BOOT按键 (GPIO35, 物理BOOT键) */
+    gpio_config_t boot_cfg = {
+        .pin_bit_mask = 1ULL << BOOT_GPIO_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&boot_cfg); 
+    ESP_LOGI(TAG, "BOOT button initialized on GPIO%d", BOOT_GPIO_PIN);
+
     /* 初始化LVGL显示 */
     lvgl_demo();                /* 运行LVGL例程 */
-
-    /* 初始化KEY1 (BOOT按键, GPIO35, 上拉输入) */
-    gpio_config_t key1_cfg = {
-        .pin_bit_mask = 1ULL << KEY1_GPIO_PIN,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&key1_cfg);
-    ESP_LOGI(TAG, "KEY1 initialized on GPIO%d", KEY1_GPIO_PIN);
-
-    /* 初始化KEY0 (EXIO8, 上拉输入) */
-    gpio_config_t key0_cfg = {
-        .pin_bit_mask = 1ULL << KEY0_GPIO_PIN,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&key0_cfg);
-    ESP_LOGI(TAG, "KEY0 initialized on GPIO%d (EXIO8)", KEY0_GPIO_PIN);
 
     /* 初始化CAN (TWAI) */
     ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);

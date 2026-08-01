@@ -2,13 +2,15 @@ set(src_dirs
             LED
             LCD
             MYIIC
-            TOUCH)
+            TOUCH
+            XL9555)
 
 set(include_dirs
             LED
             LCD
             MYIIC
-            TOUCH)
+            TOUCH
+            XL9555)
 
 set(requires
             driver
