@@ -11,3 +11,4 @@ __pycache__/
 *.csv
 managed_components/
 main/ui/ui_image_logo.c
+main/ui/ui_image_main.c

@@ -11,8 +11,7 @@
     "styles.h",
     "ui.c",
     "ui.h",
-    "ui_font_1111.c",
-    "ui_font_2.c",
+    "ui_font_aaa.c",
     "ui_font_font_race.c",
     "ui_font_orbiter_bold_100.c",
     "ui_font_orbitron_bold_20.c",
@@ -20,8 +19,7 @@
     "ui_font_orbitron_bold_30.c",
     "ui_font_orbitron_bold_40.c",
     "ui_font_orbitron_bold_50.c",
-    "ui_font_race_70.c",
-    "ui_image_logo.c",
+    "ui_image_main.c",
     "vars.h"
   ]
 }

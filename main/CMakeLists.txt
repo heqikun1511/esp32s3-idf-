@@ -14,3 +14,6 @@ idf_component_register(
         nvs_flash
         esp_timer
         BSP)
+
+# Compatibility implementations for EEZ native variables referenced by screens.c.
+target_sources(${COMPONENT_LIB} PRIVATE "ui_compat.c")

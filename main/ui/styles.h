@@ -23,22 +23,6 @@ lv_style_t *get_style_text_MAIN_DEFAULT();
 void add_style_text(lv_obj_t *obj);
 void remove_style_text(lv_obj_t *obj);
 
-// Style: 1
-lv_style_t *get_style_1_INDICATOR_DEFAULT();
-lv_style_t *get_style_1_MAIN_DEFAULT();
-void add_style_1(lv_obj_t *obj);
-void remove_style_1(lv_obj_t *obj);
-
-// Style: 2
-lv_style_t *get_style_2_MAIN_DEFAULT();
-void add_style_2(lv_obj_t *obj);
-void remove_style_2(lv_obj_t *obj);
-
-// Style: 3
-lv_style_t *get_style_3_MAIN_DEFAULT();
-void add_style_3(lv_obj_t *obj);
-void remove_style_3(lv_obj_t *obj);
-
 #ifdef __cplusplus
 }
 #endif

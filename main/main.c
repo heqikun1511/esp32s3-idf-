@@ -29,76 +29,6 @@ static SemaphoreHandle_t g_rpm_mutex = NULL;
 /* KEY0和KEY1通过XL9555 IO扩展器连接 (见原理图) */
 /* KEY0 = EXIO8 (IO1_0), KEY1 = EXIO7 (IO0_7) */
 
-/*
- * 任务选择 (Mission Selection)
- * 对应 AMI 屏幕上的六边形布局
- */
-#define MISSION_COUNT 6
-
-static const char *mission_names[MISSION_COUNT] = {
-    "车辆任务",     /* cherck - 0 */
-    "有人驾驶",     /* youren - 1 (初始选中) */
-    "直线加速",     /* line_acc - 2 */
-    "八字绕杆",     /* eight - 3 */
-    "高速循迹",     /* high_foll - 4 */
-    "EBS测试",      /* ebs - 5 */
-};
-
-/* 当前选中的任务索引 (初始为1=有人驾驶) */
-static uint8_t current_mission = 1;
-
-/*
- * 将LED数组索引映射到screens.h中的objects_t成员
- * 顺序必须与mission_names一致
- */
-static lv_obj_t **mission_leds[MISSION_COUNT] = {
-    &objects.cherck,     /* 0: 车辆任务 */
-    &objects.youren,     /* 1: 有人驾驶 */
-    &objects.line_acc,   /* 2: 直线加速 */
-    &objects.eight,      /* 3: 八字绕杆 */
-    &objects.high_foll,  /* 4: 高速循迹 */
-    &objects.ebs,        /* 5: EBS测试 */
-};
-
-/** 更新所有任务LED：选中=红色，未选中=绿色 */
-static void update_mission_leds(void)
-{
-    for (int i = 0; i < MISSION_COUNT; i++) {
-        lv_obj_t *led = *mission_leds[i];
-        if (!led) continue;
-        if (i == current_mission) {
-            lv_led_set_color(led, lv_color_hex(0xff0000));  /* 红色: 选中 */
-        } else {
-            lv_led_set_color(led, lv_color_hex(0x09cd4c));  /* 绿色: 未选中 */
-        }
-    }
-}
-
-/** 切换到下一个任务 (循环) */
-static void next_mission(void)
-{
-    current_mission = (current_mission + 1) % MISSION_COUNT;
-    ESP_LOGI(TAG, "Mission selected: %s [%d/%d]",
-             mission_names[current_mission], current_mission + 1, MISSION_COUNT);
-    update_mission_leds();
-}
-
-/** 确认当前任务, 跳转到DriverView并设置MISSION标签 */
-static void confirm_mission(void)
-{
-    ESP_LOGI(TAG, "Mission confirmed: %s", mission_names[current_mission]);
-
-    /* 更新DriverView上的MISSION标签 (obj15) */
-    if (objects.obj15) {
-        char mission_buf[32];
-        snprintf(mission_buf, sizeof(mission_buf), "\"MISSION: %s\"", mission_names[current_mission]);
-        lv_label_set_text(objects.obj15, mission_buf);
-    }
-
-    /* 跳转到DriverView */
-    lv_disp_load_scr(objects.driver_view);
-}
-
 /* CAN TX引脚 (根据实际硬件修改) */
 #define CAN_TX_PIN  GPIO_NUM_27
 /* CAN RX引脚 (根据实际硬件修改) */
@@ -161,9 +91,6 @@ static void ui_update_task(void *arg)
 
     ESP_LOGI(TAG, "UI update task started");
 
-    /* 初始选中 "有人驾驶" */
-    update_mission_leds();
-
     while (1)
     {
         int current_rpm = 0;
@@ -214,19 +141,19 @@ static void ui_update_task(void *arg)
 
                 if (active_scr == objects.ami) {
                     /* AMI → AUTONOMOUS */
-                    lv_disp_load_scr(objects.autonomous);
+                    loadScreen(SCREEN_ID_AUTONOMOUS);
                 } else if (active_scr == objects.autonomous) {
                     /* AUTONOMOUS → DRIVER_VIEW */
-                    lv_disp_load_scr(objects.driver_view);
+                    loadScreen(SCREEN_ID_DRIVER_VIEW);
                 } else {
                     /* DRIVER_VIEW (或其它) → AMI */
-                    lv_disp_load_scr(objects.ami);
+                    loadScreen(SCREEN_ID_AMI);
                 }
             }
             boot_last = curr;
         }
 
-        /* === KEY1 (EXIO7, XL9555) 扫描 — 确认任务进入DriverView === */
+        /* === KEY1 (EXIO7, XL9555) 扫描 — 切换 DriverView/Autonomous === */
         {
             uint8_t val = xl9555_key1_read();
             static uint8_t debounce_cnt = 0;
@@ -236,11 +163,12 @@ static void ui_update_task(void *arg)
 
             if (key1_last == 1 && curr == 0)
             {
-                ESP_LOGI(TAG, "KEY1 pressed (EXIO7) - confirm mission");
+                ESP_LOGI(TAG, "KEY1 pressed (EXIO7)");
 
-                if (active_scr == objects.ami) {
-                    /* AMI屏幕: 确认当前任务, 跳转到DriverView */
-                    confirm_mission();
+                if (active_scr == objects.autonomous) {
+                    lv_disp_load_scr(objects.driver_view);
+                } else {
+                    lv_disp_load_scr(objects.autonomous);
                 }
             }
             key1_last = curr;
