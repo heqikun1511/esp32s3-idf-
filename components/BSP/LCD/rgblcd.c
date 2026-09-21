@@ -122,10 +122,10 @@ esp_lcd_panel_handle_t rgblcd_init(void)
             .v_res              = rgbdev.pheight,   /* 垂直分辨率,即帧中的行数 */
             .hsync_back_porch   = rgbdev.hbp,       /* 水平后廊,hsync和行活动数据开始之间的PCLK数 */
             .hsync_front_porch  = rgbdev.hfp,       /* 水平前廊,活动数据结束和下一个hsync之间的PCLK数 */
-            .hsync_pulse_width  = rgbdev.vsw,       /* 垂直同步宽度,单位:行数 */
+            .hsync_pulse_width  = rgbdev.hsw,       /* 水平同步宽度,单位:PCLK周期 */
             .vsync_back_porch   = rgbdev.vbp,       /* 垂直后廊,vsync和帧开始之间的无效行数 */
             .vsync_front_porch  = rgbdev.vfp,       /* 垂直前廊,帧结束和下一个vsync之间的无效行数 */
-            .vsync_pulse_width  = rgbdev.hsw,       /* 水平同步宽度,单位:PCLK周期 */
+            .vsync_pulse_width  = rgbdev.vsw,       /* 垂直同步宽度,单位:行数 */
             .flags = {
                 .pclk_active_neg = true,            /* RGB数据在下降沿计时 */
             },
@@ -133,7 +133,7 @@ esp_lcd_panel_handle_t rgblcd_init(void)
         .flags.fb_in_psram = true,                  /* 在PSRAM中分配帧缓冲区 */
     };
 
-    esp_lcd_new_rgb_panel(&panel_config, &panel_handle);/* 创建RGB对象 */
+    ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle)); /* 创建RGB对象 */
  
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle)); /* 复位RGB屏 */
     

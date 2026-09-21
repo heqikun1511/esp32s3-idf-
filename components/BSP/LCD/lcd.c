@@ -27,9 +27,31 @@
 
 DRAM_ATTR void *lcd_buffer[2];              /* 指向屏幕双缓存 */
 DRAM_ATTR uint8_t buffer_sw = 0;            /* 当前使用的缓冲区索引 */
-DRAM_ATTR uint8_t refresh_done_flag = 0;    /* 缓存切换索引 */
+DRAM_ATTR volatile uint8_t refresh_done_flag = 0; /* ISR/任务共享的刷新完成标志 */
 DRAM_ATTR _lcd_dev lcddev;                  /* 管理LCD重要参数 */
 uint32_t g_back_color  = 0xFFFF;            /* 背景色 */
+
+/*
+ * Put the panel into a known safe state before the DSI host is initialized.
+ * Keeping BL low prevents a lit-but-uninitialized panel; RST is later pulsed
+ * by mipi_lcd_panelreset() after the DSI PHY has been powered up.
+ */
+static void lcd_control_gpio_init(void)
+{
+    const gpio_config_t config = {
+        .pin_bit_mask = (1ULL << LCD_BL_PIN) | (1ULL << LCD_RST_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_ERROR_CHECK(gpio_config(&config));
+    LCD_BACKLIGHT_OFF();
+    LCD_RESET_ASSERT();
+    ESP_LOGI("lcd", "LCD control GPIO ready: BL=GPIO%d (active high), RST=GPIO%d (active low)",
+             LCD_BL_PIN, LCD_RST_PIN);
+}
 
 /**
  * @brief       读取RGB LCD ID
@@ -134,15 +156,7 @@ void lcd_init(void)
     lcddev.ctrl.lcd_rst = LCD_RST_PIN;                          /* 复位管脚 */
     lcddev.ctrl.lcd_bl = LCD_BL_PIN;                            /* 背光管脚 */
 
-    gpio_config_t gpio_init_struct = {0};
-    gpio_init_struct.intr_type    = GPIO_INTR_DISABLE;          /* 失能引脚中断 */
-    gpio_init_struct.mode         = GPIO_MODE_OUTPUT;           /* 输出模式 */
-    gpio_init_struct.pull_up_en   = GPIO_PULLUP_DISABLE;        /* 失能上拉 */
-    gpio_init_struct.pull_down_en = GPIO_PULLDOWN_DISABLE;      /* 失能下拉 */
-    gpio_init_struct.pin_bit_mask = 1ull << lcddev.ctrl.lcd_bl; /* 设置的引脚的位掩码 */
-    ESP_ERROR_CHECK(gpio_config(&gpio_init_struct));            /* 配置GPIO */
-
-    LCD_BL(0);      /* 背光关闭 */
+    lcd_control_gpio_init();
 
     if (lcddev.id != 0) /* RGBLCD屏幕已插入，且以这个屏幕为主 */
     {
@@ -168,9 +182,10 @@ void lcd_init(void)
         ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(lcddev.lcd_panel_handle, &mipi_cbs, NULL));
     }
 
+    /* 面板和帧缓冲区已经就绪，先打开背光。即使首帧刷新异常，也不会表现为
+     * 完全无供电的黑屏，便于在没有串口监视器时判断硬件状态。 */
+    LCD_BACKLIGHT_ON();
     lcd_clear(WHITE);
-
-    LCD_BL(1);      /* 打开背光 */
 }
 
 /**
@@ -188,16 +203,30 @@ IRAM_ATTR void lcd_clear(uint16_t color)
         buffer[i] = color;
     }
 
-    esp_lcd_panel_draw_bitmap(lcddev.lcd_panel_handle, 0, 0, lcddev.width, lcddev.height, buffer);
-    /* 清除缓存标志 */
+    /* 必须在提交刷新之前清标志。原来的顺序存在竞态：若回调在
+     * draw_bitmap() 返回前执行，随后清零会导致这里永久等待。 */
     refresh_done_flag = 0;
-
-    do
+    esp_err_t ret = esp_lcd_panel_draw_bitmap(lcddev.lcd_panel_handle, 0, 0,
+                                               lcddev.width, lcddev.height, buffer);
+    if (ret != ESP_OK)
     {
-        /* 等待内部缓存刷新完成 */
-        vTaskDelay(1);
+        ESP_LOGE("lcd", "draw bitmap failed: %s", esp_err_to_name(ret));
+        return;
     }
-    while (refresh_done_flag != 1);
+
+    /* 显示硬件异常时不能永久卡死整个应用。正常一帧远小于500 ms。 */
+    uint32_t timeout_ms = 500;
+    while (refresh_done_flag != 1 && timeout_ms-- > 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    if (refresh_done_flag != 1)
+    {
+        ESP_LOGW("lcd", "frame refresh timeout");
+        return;
+    }
+
     /* 使用异或操作在 0 和 1 之间切换，目的是为了切换另一个缓冲区 */
     buffer_sw ^= 1;
 }

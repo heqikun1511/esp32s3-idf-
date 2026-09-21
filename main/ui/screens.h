@@ -188,6 +188,8 @@ typedef struct _objects_t {
     lv_obj_t *inspect_data_valid;
     lv_obj_t *inspect_footer;
     lv_obj_t *inspect_footer_status;
+    lv_obj_t *inspect_state_led;
+    lv_obj_t *inspect_amoy_logo;
     lv_obj_t *inspect_data_age;
 } objects_t;
 

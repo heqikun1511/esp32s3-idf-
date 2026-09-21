@@ -32,15 +32,25 @@
 #define GPIO_LCD_ID1     (GPIO_NUM_14)
 #define GPIO_LCD_ID2     (GPIO_NUM_8)
 #define GPIO_LCD_ID3     (GPIO_NUM_3)
-/* 定义背光和复位IO */
-#define LCD_BL_PIN       (GPIO_NUM_53)
-#define LCD_RST_PIN      (GPIO_NUM_52)
+/*
+ * MIPI LCD control signals on the custom board:
+ *   GPIO53 -> LCD_BL   (active high: 1 enables the backlight)
+ *   GPIO52 -> LCD_RST  (active low: 0 resets the panel)
+ *
+ * DSI_CLK± and DSI_DATA[0:1]± are dedicated DSI differential pins. They are
+ * configured by esp_lcd_new_dsi_bus(), never as ordinary GPIO outputs.
+ */
+#define LCD_BL_PIN               (GPIO_NUM_53)
+#define LCD_RST_PIN              (GPIO_NUM_52)
+#define LCD_BL_ACTIVE_LEVEL      1
+#define LCD_RST_ACTIVE_LEVEL     0
 
-/* 操作LCD_BL */
-#define LCD_BL(x)       do { x ?                                \
-                             gpio_set_level(LCD_BL_PIN, 1):     \
-                             gpio_set_level(LCD_BL_PIN, 0);     \
-                        } while(0)
+#define LCD_BL(level)            gpio_set_level(LCD_BL_PIN, (level))
+#define LCD_RST(level)           gpio_set_level(LCD_RST_PIN, (level))
+#define LCD_BACKLIGHT_OFF()      LCD_BL(!LCD_BL_ACTIVE_LEVEL)
+#define LCD_BACKLIGHT_ON()       LCD_BL(LCD_BL_ACTIVE_LEVEL)
+#define LCD_RESET_ASSERT()       LCD_RST(LCD_RST_ACTIVE_LEVEL)
+#define LCD_RESET_RELEASE()      LCD_RST(!LCD_RST_ACTIVE_LEVEL)
 
 /* 常用颜色值 */
 #define WHITE           0xFFFF      /* 白色 */

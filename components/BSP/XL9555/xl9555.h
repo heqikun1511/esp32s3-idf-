@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 /* XL9555 设备地址 (A2=A1=A0=GND) */
-#define XL9555_ADDR         0x20
+#define XL9555_ADDR         0x24
 
 /* XL9555 寄存器地址 */
 #define XL9555_INPUT_PORT0  0x00    /* 输入端口0 (只读) */
@@ -37,18 +37,19 @@ extern "C" {
  * EXIO3 (IO0_3) - RS485_RE
  * EXIO4 (IO0_4) - SLCD_PWR
  * EXIO5 (IO0_5) - SLCD_RST
- * EXIO6 (IO0_6) - KEY2
- * EXIO7 (IO0_7) - KEY1   ←
- * EXIO8 (IO1_0) - KEY0   ←
- * EXIO9 (IO1_1) - AP_INT
- * EXIO10(IO1_2) - QMI_INT
+ * EXIO8 (IO1_0) - KEY0
+ * EXIO9 (IO1_1) - KEY1
+ * EXIO10(IO1_2) - KEY2
  * EXIO11(IO1_3) - LED1
  * EXIO12-15     - 其他
  */
 
 /* KEY连接在EXIO上的位定义 */
 #define XL9555_KEY0_BIT     (1 << 0)    /* EXIO8 = IO1_0 */
-#define XL9555_KEY1_BIT     (1 << 7)    /* EXIO7 = IO0_7 */
+#define XL9555_KEY1_BIT     (1 << 1)    /* EXIO9 = IO1_1 */
+#define XL9555_KEY2_BIT     (1 << 2)    /* EXIO10 = IO1_2 */
+#define XL9555_EXTIO9_BIT   XL9555_KEY1_BIT
+#define XL9555_EXTIO10_BIT  XL9555_KEY2_BIT
 
 /**
  * @brief       初始化XL9555
@@ -64,10 +65,20 @@ esp_err_t xl9555_init(i2c_master_bus_handle_t bus_handle);
 uint8_t xl9555_key0_read(void);
 
 /**
- * @brief       读取KEY1状态 (EXIO7)
+ * @brief       读取KEY1状态 (EXIO9)
  * @retval      0=按下, 1=松开 (低电平有效)
  */
 uint8_t xl9555_key1_read(void);
+
+/**
+ * @brief       读取KEY2状态 (EXIO10)
+ * @retval      0=按下, 1=松开 (低电平有效)
+ */
+uint8_t xl9555_key2_read(void);
+
+/** 读取EXIO9/EXIO10按键，0=按下，1=松开（低电平有效）。 */
+uint8_t xl9555_extio9_read(void);
+uint8_t xl9555_extio10_read(void);
 
 #ifdef __cplusplus
 }

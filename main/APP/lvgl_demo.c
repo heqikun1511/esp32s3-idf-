@@ -29,6 +29,25 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "ui/ui.h"
+#include "freertos/semphr.h"
+
+
+/*互斥锁*/
+static SemaphoreHandle_t g_lvgl_mutex = NULL;
+
+bool lvgl_port_lock(TickType_t timeout)
+{
+    return g_lvgl_mutex &&
+           xSemaphoreTake(g_lvgl_mutex, timeout) == pdTRUE;
+}
+
+void lvgl_port_unlock(void)
+{
+    if (g_lvgl_mutex) {
+        xSemaphoreGive(g_lvgl_mutex);
+    }
+}
+
 
 /* MIPI竖屏旋转和PSRAM旋转缓冲区 */
 static bool g_need_rotate = false;
@@ -51,7 +70,10 @@ static void lvgl_timer_task(void *arg)
 
     while (1)
     {
-        lv_timer_handler();             /* LVGL计时器处理 */
+        if (lvgl_port_lock(portMAX_DELAY)) {
+    lv_timer_handler();
+    lvgl_port_unlock();
+}
         esp_task_wdt_reset();           /* 喂狗 */
         vTaskDelay(pdMS_TO_TICKS(10));  /* 延时10毫秒 */
     }
@@ -64,6 +86,8 @@ static void lvgl_timer_task(void *arg)
  */
 void lvgl_demo(void)
 {
+    g_lvgl_mutex = xSemaphoreCreateMutex();
+    assert(g_lvgl_mutex);
     lv_init();              /* 初始化LVGL图形to_rgb565.c:256库 */
     lv_port_disp_init();    /* lvgl显示接口初始化,放在lv_init()的后面 */
     lv_port_indev_init();   /* lvgl输入接口初始化,放在lv_init()的后面 */

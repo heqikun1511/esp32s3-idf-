@@ -11,6 +11,8 @@ static const char *TAG = "XL9555";
 
 static i2c_master_dev_handle_t xl9555_dev = NULL;
 
+static uint8_t xl9555_port1_key_read(uint8_t mask);
+
 /**
  * @brief       写XL9555寄存器
  */
@@ -45,13 +47,11 @@ esp_err_t xl9555_init(i2c_master_bus_handle_t bus_handle)
         return ret;
     }
 
-    /* 配置端口: KEY0(IO1_0)和KEY1(IO0_7)为输入, 其余保持默认 */
-    /* Port 0: IO0_7 (KEY1) = 输入, 其余保持输出(0) */
-    /* Port 1: IO1_0 (KEY0) = 输入, 其余保持输出(0) */
-    xl9555_write_reg(XL9555_CFG_PORT0, XL9555_KEY1_BIT);   /* 仅bit7=1(输入) */
-    xl9555_write_reg(XL9555_CFG_PORT1, XL9555_KEY0_BIT);   /* 仅bit0=1(输入) */
+    /* 官方手册配置字为0x1F00：EXIO8~12均为输入。 */
+    xl9555_write_reg(XL9555_CFG_PORT0, 0x00);
+    xl9555_write_reg(XL9555_CFG_PORT1, 0x1F);
 
-    ESP_LOGI(TAG, "XL9555 initialized (KEY0=EXIO8, KEY1=EXIO7)");
+    ESP_LOGI(TAG, "XL9555 initialized (KEY0=EXIO8, KEY1=EXIO9, KEY2=EXIO10)");
     return ESP_OK;
 }
 
@@ -68,13 +68,33 @@ uint8_t xl9555_key0_read(void)
 }
 
 /**
- * @brief       读取KEY1状态 (EXIO7 = IO0_7)
+ * @brief       读取KEY1状态 (EXIO9 = IO1_1)
  */
 uint8_t xl9555_key1_read(void)
 {
+    return xl9555_port1_key_read(XL9555_KEY1_BIT);
+}
+
+static uint8_t xl9555_port1_key_read(uint8_t mask)
+{
     uint8_t val = 0;
-    if (xl9555_read_reg(XL9555_INPUT_PORT0, &val) == ESP_OK) {
-        return (val & XL9555_KEY1_BIT) ? 1 : 0;
+    if (xl9555_read_reg(XL9555_INPUT_PORT1, &val) == ESP_OK) {
+        return (val & mask) ? 1 : 0;
     }
-    return 1; /* 读取失败返回松开 */
+    return 1;
+}
+
+uint8_t xl9555_extio9_read(void)
+{
+    return xl9555_port1_key_read(XL9555_EXTIO9_BIT);
+}
+
+uint8_t xl9555_extio10_read(void)
+{
+    return xl9555_port1_key_read(XL9555_EXTIO10_BIT);
+}
+
+uint8_t xl9555_key2_read(void)
+{
+    return xl9555_port1_key_read(XL9555_KEY2_BIT);
 }
