@@ -38,11 +38,18 @@
 
 /* MIPI DSI总线配置 */
 #define MIPI_DSI_LANE_NUM               2       /* 2个通道数据线 */
-#define MIPI_DSI_LANE_BITRATE_MBPS      700     /* 通道比特率（RGB888调节为1000，RGB565调节为700） */
+/*
+ * 诊断基线：与 ESP-IDF 的 ESP32-P4 MIPI-DSI 示例保持一致。
+ * 此项只影响 DSI PHY 的 PLL；屏控制器初始化序列仍按 RGB565 发送。
+ */
+#define MIPI_DSI_LANE_BITRATE_MBPS      700     /* ATK-MD0550M 两-lane RGB565 原始驱动参数 */
+
+/* One-shot D0 LP/BTA diagnostic. Set to 0 after the hardware test. */
+#define MIPI_DSI_ID_READ_DIAGNOSTIC     1
 
 /* 设置VDD_MIPI_DPHY输出电压 */
 #define MIPI_DSI_PHY_PWR_LDO_CHAN       3       /* LDO_VO3 连接 VDD_MIPI_DPHY */
-#define MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV 1900    /* 输出1.8V给到MIPI屏 */
+#define MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV 2500    /* 乐鑫 ESP32-P4 Function EV Board MIPI-DSI 参考参数 */
 
 /* ILI9881C User Define command set 用户自定义命令集 */
 #define ILI9881C_CMD_CNDBKxSEL                  (0xFF)

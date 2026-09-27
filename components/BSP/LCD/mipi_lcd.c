@@ -19,12 +19,72 @@
  */
 
 #include "mipi_lcd.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdlib.h>
 
 static const char *mipi_lcd_tag = "mipi_lcd";
 uint8_t mipi_id[2];     /* 存放MIPI屏驱动IC的ID */
 _mipilcd_dev mipidev;   /* 管理MIPI重要参数 */
+
+#if MIPI_DSI_ID_READ_DIAGNOSTIC
+typedef struct {
+    esp_lcd_panel_io_handle_t io;
+    TaskHandle_t waiting_task;
+    esp_err_t ret_da;
+    esp_err_t ret_db;
+    uint8_t id_da;
+    uint8_t id_db;
+} mipi_id_read_ctx_t;
+
+/* DSI reads require D0 to turn around and drive the reply.  Run them in a
+ * worker because the IDF v6.0.2 DBI read path has no caller-visible timeout. */
+static void mipi_id_read_worker(void *arg)
+{
+    mipi_id_read_ctx_t *ctx = arg;
+    ctx->ret_da = esp_lcd_panel_io_rx_param(ctx->io, 0xDA, &ctx->id_da, 1);
+    if (ctx->ret_da == ESP_OK) {
+        ctx->ret_db = esp_lcd_panel_io_rx_param(ctx->io, 0xDB, &ctx->id_db, 1);
+    } else {
+        ctx->ret_db = ESP_FAIL;
+    }
+    xTaskNotifyGive(ctx->waiting_task);
+    vTaskDelete(NULL);
+}
+
+static bool mipi_lcd_diagnose_id_read(esp_lcd_panel_io_handle_t io)
+{
+    mipi_id_read_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (ctx == NULL) {
+        ESP_LOGE(mipi_lcd_tag, "DSI ID diagnostic: no memory for read context");
+        return false;
+    }
+    ctx->io = io;
+    ctx->waiting_task = xTaskGetCurrentTaskHandle();
+    /* Keep this potentially blocking IDF read below the main task so the
+     * caller's 200 ms timeout can always preempt it. */
+    if (xTaskCreate(mipi_id_read_worker, "mipi_id_read", 4096, ctx,
+                    tskIDLE_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(mipi_lcd_tag, "DSI ID diagnostic: cannot start read task");
+        free(ctx);
+        return false;
+    }
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200)) == 0) {
+        /* Keep ctx allocated: the worker may still be blocked inside IDF. A
+         * reset after this one-shot test releases it safely. */
+        ESP_LOGE(mipi_lcd_tag,
+                 "DSI ID diagnostic TIMEOUT: no D0 LP/BTA reply within 200 ms");
+        return false;
+    }
+    ESP_LOGI(mipi_lcd_tag, "DSI ID diagnostic: 0xDA=0x%02X (%s), 0xDB=0x%02X (%s)",
+             ctx->id_da, esp_err_to_name(ctx->ret_da),
+             ctx->id_db, esp_err_to_name(ctx->ret_db));
+    bool ok = (ctx->ret_da == ESP_OK && ctx->ret_db == ESP_OK);
+    free(ctx);
+    return ok;
+}
+#endif
 
 static const mipi_lcd_init_cmd_t vendor_specific_init_code_default_800p[] = {
     /* {cmd, { data }, data_size} */
@@ -354,6 +414,8 @@ static esp_err_t mipi_lcd_panelinit(esp_lcd_panel_t *panel)
     bool mirror_x = true;
     bool mirror_y = false;
 
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: entering controller initialisation");
+
     if (mipidev.id == 0x8399)       /* 5寸,720P */
     {
         init_cmds = vendor_specific_init_code_default_1080p;
@@ -388,13 +450,20 @@ static esp_err_t mipi_lcd_panelinit(esp_lcd_panel_t *panel)
     /* 发送初始化序列 */
     for (int i = 0; i < init_cmds_size; i++)
     {
+        ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: init command %d/%d: 0x%02X",
+                 i + 1, init_cmds_size, init_cmds[i].cmd);
         ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, init_cmds[i].cmd, init_cmds[i].data, init_cmds[i].data_bytes), mipi_lcd_tag, "send command failed");
     }
 
-    vTaskDelay(pdMS_TO_TICKS(120));
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: vendor command sequence complete");
 
     /* 退出睡眠 */
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: sending Sleep Out (0x11)");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, LCD_CMD_SLPOUT, NULL, 0), mipi_lcd_tag, "io tx param failed");
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: Sleep Out sent");
+    /* HX8399 needs at least 120 ms after Sleep Out before format/display commands. */
+    esp_rom_delay_us(120000);
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: Sleep Out delay complete");
     
     /* 根据MIPI屏放置位置调整显示方向(也可调用mipi_lcd_panelmirror函数设置) */
     if (mirror_x)
@@ -414,16 +483,25 @@ static esp_err_t mipi_lcd_panelinit(esp_lcd_panel_t *panel)
     {
         mipi_lcd->madctl_val &= ~HX_F_GS_PANEL;     /* 扫描方向垂直不翻转 */
     }
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: sending MADCTL (0x36)");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, LCD_CMD_MADCTL, (uint8_t[])
     {
         mipi_lcd->madctl_val,
     }, 1), mipi_lcd_tag, "send command failed");    /* 配置MIPILCD的显示 */
 
+    /* The P4 DSI DBI command FIFO needs time to consume the preceding short
+     * packet before another short packet is queued. */
+    esp_rom_delay_us(10000);
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: MADCTL command FIFO drain complete");
+
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: sending COLMOD RGB565 (0x3A)");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, LCD_CMD_COLMOD, (uint8_t[])
     {
         mipi_lcd->colmod_val,
     }, 1), mipi_lcd_tag, "send command failed");    /* 配置像素格式 */
-    vTaskDelay(pdMS_TO_TICKS(120));
+    /* Keep this short delay independent of the FreeRTOS tick while DSI is active. */
+    esp_rom_delay_us(120000);
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: controller initialisation complete");
 
     return ESP_OK;
 }
@@ -662,10 +740,21 @@ esp_lcd_panel_handle_t mipi_lcd_init(void)
     esp_lcd_dsi_bus_config_t bus_config = {
         .bus_id             = 0,                            /* 总线ID */
         .num_data_lanes     = MIPI_DSI_LANE_NUM,            /* 2路数据信号 */
-        .phy_clk_src        = MIPI_DSI_PHY_CLK_SRC_DEFAULT, /* DPHY时钟源为20M */
+        /* 设为 0 交给 ESP-IDF 按芯片版本选择。
+         * 旧宏 MIPI_DSI_PHY_CLK_SRC_DEFAULT 固定为 PLL_F20M，仅适用于
+         * ESP32-P4 rev < 3.0；本工程 CONFIG_ESP32P4_REV_MIN_300=y 时应
+         * 使用 rev >= 3.0 的 XTAL 参考时钟，否则在创建 DSI 总线时 panic。 */
+        .phy_clk_src        = 0,
         .lane_bit_rate_mbps = MIPI_DSI_LANE_BITRATE_MBPS,   /* 数据通道比特率(Mbps) */
     };
-    ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus));   /* 新建DSI总线 */
+    /* 不用 ESP_ERROR_CHECK：创建失败时先把实际错误码输出，避免 USB CDC 随 panic
+     * 一起断开而无法诊断。调用者会识别 NULL 句柄并保持背光测试运行。 */
+    esp_err_t dsi_ret = esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "esp_lcd_new_dsi_bus failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
 
     /* 配置DSI总线的DBI接口 */
     esp_lcd_panel_io_handle_t mipi_dbi_io;
@@ -674,7 +763,14 @@ esp_lcd_panel_handle_t mipi_lcd_init(void)
         .lcd_cmd_bits    = 8,                               /* 根据MIPI LCD驱动IC规格设置 命令位宽度 */
         .lcd_param_bits  = 8,                               /* 根据MIPI LCD驱动IC规格设置 参数位宽度 */
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &mipi_dbi_io));
+    ESP_LOGI(mipi_lcd_tag, "DSI diagnostic: creating DBI command interface");
+    dsi_ret = esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &mipi_dbi_io);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "esp_lcd_new_panel_io_dbi failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
+    ESP_LOGI(mipi_lcd_tag, "DSI diagnostic: DBI command interface ready");
 
     /* 创建LCD控制器驱动 */
     esp_lcd_panel_handle_t mipi_lcd_ctrl_panel;             /* MIPI控制句柄 */
@@ -683,31 +779,56 @@ esp_lcd_panel_handle_t mipi_lcd_init(void)
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,         /* 像素数据的RGB元素顺序,根据实际色彩情况选择BGR或RGB */
         .reset_gpio_num = lcddev.ctrl.lcd_rst,              /* MIPILCD屏的复位引脚 */
     };
-    ESP_ERROR_CHECK(mipi_lcd_new_panel(mipi_dbi_io, &lcd_dev_config, &mipi_lcd_ctrl_panel));
-
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(mipi_lcd_ctrl_panel));              /* 复位MIPILCD屏 */
-
-    /* 读取屏幕ID */
-    esp_lcd_panel_io_rx_param(mipi_dbi_io, 0xDA, &mipi_id[0], 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    esp_lcd_panel_io_rx_param(mipi_dbi_io, 0xDB, &mipi_id[1], 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    /* 不是HX8399和HX8394 */
-    if (mipi_id[0] == 0x00 || mipi_id[1] == 0x00)
-    {
-        /* 读取ILI9881 ID */
-        esp_lcd_panel_io_tx_param(mipi_dbi_io, ILI9881C_CMD_CNDBKxSEL, (uint8_t[]) {
-            ILI9881C_CMD_BKxSEL_BYTE0, ILI9881C_CMD_BKxSEL_BYTE1, ILI9881C_CMD_BKxSEL_BYTE2_PAGE1
-        }, 3);
-        esp_lcd_panel_io_rx_param(mipi_dbi_io, 0x00, &mipi_id[0], 1);
-        esp_lcd_panel_io_rx_param(mipi_dbi_io, 0x01, &mipi_id[1], 1);
+    ESP_LOGI(mipi_lcd_tag, "DSI diagnostic: creating LCD controller panel");
+    dsi_ret = mipi_lcd_new_panel(mipi_dbi_io, &lcd_dev_config, &mipi_lcd_ctrl_panel);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "mipi_lcd_new_panel failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
     }
+    ESP_LOGI(mipi_lcd_tag, "DSI diagnostic: LCD controller panel ready");
 
-    mipidev.id = (uint16_t)(mipi_id[0] << 8) | mipi_id[1];
-    ESP_LOGI(mipi_lcd_tag, "mipilcd_id:%#x ", mipidev.id);                  /* 打印MIPILCD的ID */
+    ESP_LOGI(mipi_lcd_tag, "DSI diagnostic: resetting LCD controller");
+    dsi_ret = esp_lcd_panel_reset(mipi_lcd_ctrl_panel);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "esp_lcd_panel_reset failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
+    ESP_LOGI(mipi_lcd_tag, "DSI diagnostic: LCD controller reset complete");
 
-    ESP_ERROR_CHECK(esp_lcd_panel_init(mipi_lcd_ctrl_panel));               /* 初始化MIPILCD屏 */
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(mipi_lcd_ctrl_panel, true));  /* 打开MIPILCD屏 */
+#if MIPI_DSI_ID_READ_DIAGNOSTIC
+    ESP_LOGI(mipi_lcd_tag, "DSI ID diagnostic: reading HX8399 0xDA/0xDB via D0 LP/BTA");
+    if (!mipi_lcd_diagnose_id_read(mipi_dbi_io)) {
+        ESP_LOGE(mipi_lcd_tag, "DSI ID diagnostic failed; video initialisation is intentionally skipped");
+        return NULL;
+    }
+#endif
+
+    /*
+     * ATK-MD0550M-10801920 is the 5.5-inch 1080x1920 HX8399 profile.
+     * This panel does not answer the generic DCS 0xDA/0xDB ID reads used by
+     * the original multi-panel BSP, leaving the DSI RX transaction pending
+     * forever. Select its known profile directly; no DSI read is required.
+     */
+    mipidev.id = 0x8399;
+    ESP_LOGI(mipi_lcd_tag, "LCD profile fixed: ATK-MD0550M-10801920 (HX8399, 1080x1920, 2-lane)");
+
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: starting controller initialisation");
+    dsi_ret = esp_lcd_panel_init(mipi_lcd_ctrl_panel);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "HX8399 controller initialisation failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: enabling display");
+    dsi_ret = esp_lcd_panel_disp_on_off(mipi_lcd_ctrl_panel, true);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "HX8399 display-on command failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: display-on command complete");
 
     if (mipidev.id == 0x8394)                                   /* 5.5寸720P屏幕 */
     {
@@ -771,8 +892,21 @@ esp_lcd_panel_handle_t mipi_lcd_init(void)
             .vsync_front_porch = mipidev.vfp,                   /* 垂直前廊,帧结束和下一个vsync之间的无效行数 */
         },
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_dpi(mipi_dsi_bus, &dpi_config, &mipi_dpi_panel));     /* 为MIPI DSI DPI接口创建LCD控制句柄 */
-    ESP_ERROR_CHECK(esp_lcd_panel_init(mipi_dpi_panel));                                    /* 初始化MIPILCD */
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: creating 1080x1920 DPI video panel");
+    dsi_ret = esp_lcd_new_panel_dpi(mipi_dsi_bus, &dpi_config, &mipi_dpi_panel);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "create DPI video panel failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: initialising DPI video panel");
+    dsi_ret = esp_lcd_panel_init(mipi_dpi_panel);
+    if (dsi_ret != ESP_OK) {
+        ESP_LOGE(mipi_lcd_tag, "initialise DPI video panel failed: %s (%d)",
+                 esp_err_to_name(dsi_ret), dsi_ret);
+        return NULL;
+    }
+    ESP_LOGI(mipi_lcd_tag, "HX8399 diagnostic: DPI video panel running");
 
     return mipi_dpi_panel;
 }

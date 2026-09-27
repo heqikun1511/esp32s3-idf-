@@ -172,6 +172,12 @@ void lcd_init(void)
     else    /* MIPI屏以插入 */
     {
         lcddev.lcd_panel_handle = mipi_lcd_init();                          /* 初始化MIPI LCD */
+        if (lcddev.lcd_panel_handle == NULL)
+        {
+            ESP_LOGE("lcd", "MIPI LCD initialisation failed; keeping backlight on for diagnosis");
+            LCD_BACKLIGHT_ON();
+            return;
+        }
         ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1])); /* 获取帧缓冲区 */
         
         const esp_lcd_dpi_panel_event_callbacks_t mipi_cbs = {
