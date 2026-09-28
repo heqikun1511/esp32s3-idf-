@@ -11,6 +11,7 @@ idf_component_register(
         "BSP"
     REQUIRES
         driver
+        esp_driver_rmt
         nvs_flash
         esp_timer
         BSP)

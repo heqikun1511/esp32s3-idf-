@@ -15,6 +15,7 @@
 #include "myiic.h"
 #include "xl9555.h"
 #include "ui.h"
+#include "ws2815_test.h"
 
 static const char *TAG = "MAIN";
 
@@ -33,6 +34,13 @@ static SemaphoreHandle_t g_rpm_mutex = NULL;
 #define CAN_TX_PIN  GPIO_NUM_27
 /* CAN RX引脚 (根据实际硬件修改) */
 #define CAN_RX_PIN  GPIO_NUM_26
+
+/*
+ * 当前只验证扩展口 GPIO3 的 3.3 V 直驱 WS2815B。
+ * 设为 1 时，跳过 RGB LCD/LVGL/CAN，避免 LCD 帧缓冲初始化失败导致复位。
+ * 灯带确认可用后改为 0，再将灯效接入 CAN 状态机。
+ */
+#define WS2815_DIRECT_TEST_ONLY  1
 
 /**
  * @brief       CAN数据接收回调(在CAN任务上下文中调用)
@@ -226,6 +234,18 @@ void app_main(void)
     };
     gpio_config(&boot_cfg); 
     ESP_LOGI(TAG, "BOOT button initialized on GPIO%d", BOOT_GPIO_PIN);
+
+    /*
+     * 临时测试：扩展口 GPIO3 的 3.3V 直驱 WS2815B DI，BI 已由硬件接地。
+     * 放在 LCD 初始化之前，确保屏幕初始化异常
+     * 时仍可验证灯带数据线。
+     */
+    ws2815_test_start();
+
+#if WS2815_DIRECT_TEST_ONLY
+    ESP_LOGW(TAG, "WS2815 direct test mode: LCD/LVGL/CAN are disabled");
+    return;
+#endif
 
     /* 初始化LVGL显示 */
     lvgl_demo();                /* 运行LVGL例程 */
