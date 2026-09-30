@@ -1,0 +1,203 @@
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_check.h"
+#include "esp_log.h"
+#include "driver/gpio.h"
+#include "driver/rmt_tx.h"
+#include "ws2815_rmt_encoder.h"
+#include "ws2815_test.h"
+
+/* Board wiring: GPIO13 -> WS2815B DI. */
+#define WS2815_TEST_GPIO          GPIO_NUM_13
+#define WS2815_TEST_LED_COUNT     16
+#define WS2815_RMT_RESOLUTION_HZ  (10 * 1000 * 1000)
+#define WS2815_FAST_BLINK_MS      100
+
+/* 0--5000 rpm display calibration. The final pre-limit red zone is 500 rpm. */
+#define RPM_START                  500
+#define RPM_YELLOW                 1800
+#define RPM_ORANGE                 3100
+#define RPM_SHIFT                  4500
+#define RPM_LIMIT                  5000
+#define RPM_BAR_REFRESH_MS         20
+#define RPM_SHIFT_FLASH_HALF_MS    70   /* about 7 Hz */
+#define RPM_LIMIT_FLASH_HALF_MS    45   /* about 11 Hz */
+
+static const char *TAG = "WS2815_TEST";
+
+static void ws2815_send_frame(rmt_channel_handle_t channel,
+                              rmt_encoder_handle_t encoder,
+                              const uint8_t *pixels)
+{
+    const rmt_transmit_config_t tx_config = { .loop_count = 0 };
+    ESP_ERROR_CHECK(rmt_transmit(channel, encoder, pixels,
+                                 WS2815_TEST_LED_COUNT * 3, &tx_config));
+    ESP_ERROR_CHECK(rmt_tx_wait_all_done(channel, portMAX_DELAY));
+}
+
+static void ws2815_set_rgb(uint8_t *pixels, size_t led,
+                            uint8_t red, uint8_t green, uint8_t blue)
+{
+    /* Hardware verification showed this LED chain accepts bytes in RGB order. */
+    pixels[led * 3 + 0] = red;
+    pixels[led * 3 + 1] = green;
+    pixels[led * 3 + 2] = blue;
+}
+
+static void ws2815_rpm_bar_frame(uint8_t *pixels, int rpm, TickType_t now)
+{
+    memset(pixels, 0, WS2815_TEST_LED_COUNT * 3);
+
+    if (rpm < RPM_START) {
+        /* All LEDs show a very dim blue standby state. */
+        for (size_t i = 0; i < WS2815_TEST_LED_COUNT; ++i) {
+            ws2815_set_rgb(pixels, i, 0, 0, 8);
+        }
+        return;
+    }
+
+    if (rpm >= RPM_SHIFT) {
+        const TickType_t half_period = pdMS_TO_TICKS(
+            rpm >= RPM_LIMIT ? RPM_LIMIT_FLASH_HALF_MS : RPM_SHIFT_FLASH_HALF_MS);
+        bool on = ((now / half_period) & 1U) == 0;
+        if (on) {
+            uint8_t red = rpm >= RPM_LIMIT ? 255 : 128;
+            for (size_t i = 0; i < WS2815_TEST_LED_COUNT; ++i) {
+                ws2815_set_rgb(pixels, i, red, 0, 0);
+            }
+        }
+        return;
+    }
+
+    const int span = RPM_SHIFT - RPM_START;
+    int lit_count = ((rpm - RPM_START) * WS2815_TEST_LED_COUNT + span - 1) / span;
+    if (lit_count < 1) {
+        lit_count = 1;
+    }
+    if (lit_count > WS2815_TEST_LED_COUNT) {
+        lit_count = WS2815_TEST_LED_COUNT;
+    }
+
+    for (int i = 0; i < lit_count; ++i) {
+        int led_rpm = RPM_START + (i * span) / WS2815_TEST_LED_COUNT;
+        if (i >= WS2815_TEST_LED_COUNT - 2) {
+            /* The final two LEDs are the red end of the orange band. */
+            ws2815_set_rgb(pixels, i, 160, 0, 0);
+        } else if (led_rpm >= RPM_ORANGE) {
+            ws2815_set_rgb(pixels, i, 180, 55, 0);
+        } else if (led_rpm >= RPM_YELLOW) {
+            ws2815_set_rgb(pixels, i, 130, 130, 0);
+        } else {
+            ws2815_set_rgb(pixels, i, 0, 130, 0);
+        }
+    }
+}
+
+static void ws2815_rpm_bar_task(void *arg)
+{
+    volatile int *rpm_source = arg;
+    rmt_channel_handle_t channel = NULL;
+    rmt_encoder_handle_t encoder = NULL;
+    const rmt_tx_channel_config_t channel_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .gpio_num = WS2815_TEST_GPIO,
+        .mem_block_symbols = 64,
+        .resolution_hz = WS2815_RMT_RESOLUTION_HZ,
+        .trans_queue_depth = 1,
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&channel_config, &channel));
+
+    const ws2815_rmt_encoder_config_t encoder_config = {
+        .resolution_hz = WS2815_RMT_RESOLUTION_HZ,
+        .reset_us = 300,
+    };
+    ESP_ERROR_CHECK(ws2815_new_rmt_encoder(&encoder_config, &encoder));
+    ESP_ERROR_CHECK(rmt_enable(channel));
+
+    ESP_LOGI(TAG, "RPM bar active: %d LEDs, %d rpm limit", WS2815_TEST_LED_COUNT,
+             RPM_LIMIT);
+    uint8_t pixels[WS2815_TEST_LED_COUNT * 3];
+    for (;;) {
+        ws2815_rpm_bar_frame(pixels, *rpm_source, xTaskGetTickCount());
+        ws2815_send_frame(channel, encoder, pixels);
+        vTaskDelay(pdMS_TO_TICKS(RPM_BAR_REFRESH_MS));
+    }
+}
+
+void ws2815_rpm_bar_start(volatile int *rpm_source)
+{
+    configASSERT(rpm_source != NULL);
+    BaseType_t created = xTaskCreate(ws2815_rpm_bar_task, "ws2815_rpm", 4096,
+                                     (void *)rpm_source, 4, NULL);
+    ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+}
+
+void gpio13_high_level_test(void)
+{
+    const gpio_config_t gpio_output_config = {
+        .pin_bit_mask = 1ULL << WS2815_TEST_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&gpio_output_config));
+    ESP_ERROR_CHECK(gpio_set_level(WS2815_TEST_GPIO, 1));
+    ESP_LOGW(TAG, "GPIO%d is held at 3.3 V", WS2815_TEST_GPIO);
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void ws2815_full_red_test(void)
+{
+    rmt_channel_handle_t channel = NULL;
+    rmt_encoder_handle_t encoder = NULL;
+
+    const rmt_tx_channel_config_t channel_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .gpio_num = WS2815_TEST_GPIO,
+        .mem_block_symbols = 64,
+        .resolution_hz = WS2815_RMT_RESOLUTION_HZ,
+        .trans_queue_depth = 1,
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&channel_config, &channel));
+
+    const ws2815_rmt_encoder_config_t encoder_config = {
+        .resolution_hz = WS2815_RMT_RESOLUTION_HZ,
+        .reset_us = 300,
+    };
+    ESP_ERROR_CHECK(ws2815_new_rmt_encoder(&encoder_config, &encoder));
+    ESP_ERROR_CHECK(rmt_enable(channel));
+
+    /*
+     * This board's LED chain uses RGB byte order (verified on hardware):
+     * FF 00 00 is full-bright red.  The usual WS281x GRB order displayed green.
+     */
+    uint8_t pixels[WS2815_TEST_LED_COUNT * 3];
+    for (size_t i = 0; i < WS2815_TEST_LED_COUNT; ++i) {
+        pixels[i * 3 + 0] = 255;
+        pixels[i * 3 + 1] = 0;
+        pixels[i * 3 + 2] = 0;
+    }
+
+    uint8_t off_pixels[WS2815_TEST_LED_COUNT * 3] = {0};
+    const rmt_transmit_config_t tx_config = { .loop_count = 0 };
+    ESP_LOGW(TAG, "GPIO%d: %u LEDs fast-blinking full red", WS2815_TEST_GPIO,
+             WS2815_TEST_LED_COUNT);
+    for (;;) {
+        /* All LEDs on: RGB = FF 00 00 (full red on this board). */
+        ESP_ERROR_CHECK(rmt_transmit(channel, encoder, pixels, sizeof(pixels), &tx_config));
+        ESP_ERROR_CHECK(rmt_tx_wait_all_done(channel, portMAX_DELAY));
+
+        vTaskDelay(pdMS_TO_TICKS(WS2815_FAST_BLINK_MS));
+
+        /* All LEDs off: GRB = 00 00 00. */
+        ESP_ERROR_CHECK(rmt_transmit(channel, encoder, off_pixels, sizeof(off_pixels), &tx_config));
+        ESP_ERROR_CHECK(rmt_tx_wait_all_done(channel, portMAX_DELAY));
+        vTaskDelay(pdMS_TO_TICKS(WS2815_FAST_BLINK_MS));
+    }
+}

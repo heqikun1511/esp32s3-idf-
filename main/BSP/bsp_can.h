@@ -29,16 +29,16 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback);
 int bsp_can_send(uint32_t can_id, uint8_t *data, uint8_t len);
 
 /**
- * @brief       解析转速值(遵循协议: 0.5rpm/bit, offset -10000rpm)
+ * @brief       解析转速值(协议: unsigned 16-bit, 0.5rpm/bit, offset -10000rpm)
  * @param       raw_low  : 低字节
  * @param       raw_high : 高字节
  * @retval      实际转速值(rpm)
  */
 static inline int bsp_can_parse_speed(uint8_t raw_low, uint8_t raw_high)
 {
-    int16_t raw = (int16_t)(raw_low | ((uint16_t)raw_high << 8));
-    /* actual_rpm = raw_value * 0.5 */
-    return (int)(raw * 0.5f);
+    uint16_t raw = raw_low | ((uint16_t)raw_high << 8);
+    /* Protocol document: actual_rpm = raw_value * 0.5 - 10000. */
+    return (int)(raw / 2) - 10000;
 }
 
 #endif

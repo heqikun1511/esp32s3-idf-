@@ -18,12 +18,15 @@
 #include "xl9555.h"
 #include "ui.h"
 #include "ui/vars.h"
+#include "ui/fonts.h"
 #include "lcd.h"
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_console.h"
 /* TINYUSB_DEFAULT_CONFIG() 宏定义在该头文件中, tinyusb.h 并不包含它 */
 #include "tinyusb_default_config.h"
+#include "ws2815_test.h"
+#include "rotary_input.h"
 
 static const char *TAG = "MAIN";
 
@@ -32,13 +35,22 @@ static const char *TAG = "MAIN";
  * 屏，并循环显示纯色；LVGL、触摸、I2C 扩展器、CAN 和 UI 任务均不会启动。
  * 确认屏幕正常后改回 0，即可恢复原应用。
  */
-#define LCD_MINIMAL_TEST 1
+#define LCD_MINIMAL_TEST 0
 /*
  * 正点原子开发板对照测试的第一阶段：只验证 GPIO53 背光。
  * 保持为 0 时绝不初始化 DSI PHY、绝不读屏 ID、绝不发送任何 MIPI 命令。
  * 确认背光后才改为 1 进入下一阶段。
  */
 #define LCD_MINIMAL_TEST_ENABLE_MIPI 0
+
+/* GPIO13 WS2812 board wiring test: hold the data pin at a steady 3.3 V. */
+#define GPIO13_HIGH_LEVEL_TEST 0
+
+/* GPIO13 WS2812 test mode: all 16 LEDs remain at full-bright red. */
+#define WS2815_FULL_RED_TEST 1
+
+/* LCD初始化完成后启用KEY2/KEY3/KEY4旋钮(GPIO3/4/5)。 */
+#define ROTARY_INPUT_ENABLE 0
 
 /* 当前转速值(由CAN回调更新, 由LVGL任务读取) */
 static volatile int g_current_rpm = 0;
@@ -174,12 +186,8 @@ static void lcd_minimal_test(void)
 #else
     ESP_LOGI(TAG, "GPIO-only test active: MIPI DSI is deliberately disabled");
     for (;;) {
-        /* 只翻转 GPIO53，肉眼确认背光实际跟随，GPIO52 与 DSI 仍不触碰。 */
-        LCD_BACKLIGHT_OFF();
-        ESP_LOGI(TAG, "Backlight-only test: GPIO53(LCD_BL)=0");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        /* Keep LCD_BL asserted continuously; GPIO52 and all DSI pins stay untouched. */
         LCD_BACKLIGHT_ON();
-        ESP_LOGI(TAG, "Backlight-only test: GPIO53(LCD_BL)=1");
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 #endif
@@ -253,17 +261,54 @@ static lv_obj_t *ami_selection_led(uint8_t index)
     return index < AMI_SELECTION_COUNT ? leds[index] : NULL;
 }
 
+static lv_obj_t *s_ami_selection_label;
+
 static void ami_show_selection(uint8_t selected)
 {
+    static const char *const names[AMI_SELECTION_COUNT] = {
+        "DRIVING", "LINE ACC", "EIGHT", "HIGH FOLLOW", "EBS", "INSPECT"};
+
+    if (!objects.ami)
+        return;
+
+    if (!s_ami_selection_label)
+    {
+        s_ami_selection_label = lv_label_create(objects.ami);
+        lv_obj_set_pos(s_ami_selection_label, 780, 500);
+        lv_obj_set_size(s_ami_selection_label, 360, 70);
+        lv_obj_set_style_text_align(s_ami_selection_label, LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(s_ami_selection_label, lv_color_hex(0xffffff),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(s_ami_selection_label, &ui_font_orbitron_bold_30,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
     for (uint8_t i = 0; i < AMI_SELECTION_COUNT; ++i)
     {
         lv_obj_t *led = ami_selection_led(i);
         if (led)
         {
-            lv_led_set_color(led, lv_color_hex(i == selected ? 0xff0000 : 0x00ff73));
+            bool is_selected = (i == selected);
+            /* 未选择为红色，当前选择为绿色。 */
+            lv_led_set_color(led, lv_color_hex(is_selected ? 0x39ff65 : 0xff2020));
             lv_led_set_brightness(led, 255);
         }
     }
+
+    if (selected < AMI_SELECTION_COUNT)
+    {
+        lv_label_set_text(s_ami_selection_label, names[selected]);
+        lv_obj_clear_flag(s_ami_selection_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        /* 未选择时不显示任何提示文字，避免遮挡主界面。 */
+        lv_label_set_text(s_ami_selection_label, "");
+        lv_obj_add_flag(s_ami_selection_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_obj_invalidate(objects.ami);
 }
 
 static void inspect_show_stage(uint8_t stage)
@@ -341,13 +386,14 @@ static void ui_update_task(void *arg)
     uint8_t boot_last = 1;
     uint8_t extio9_last = 1;
     uint8_t extio10_last = 1;
-    uint8_t ami_selection = UINT8_MAX; /* 尚未选择；首次BOOT选择第一个 */
+    uint8_t ami_selection = 0; /* 默认选择有人驾驶/DRIVING */
     uint8_t inspect_stage = 0;
     TickType_t inspect_blink_tick = xTaskGetTickCount();
     bool inspect_led_on = true;
     bool last_can_online = true; /* 强制首次循环将界面更新为CAN OFF */
 
     ESP_LOGI(TAG, "UI update task started");
+    ami_show_selection(ami_selection);
 
     while (1)
     {
@@ -404,7 +450,7 @@ static void ui_update_task(void *arg)
             last_can_online = can_online;
         }
 
-        /* === 独立BOOT / GPIO35：主页面顺时针轮选 === */
+        /* === 独立BOOT / GPIO35：任何页面返回主界面 === */
         {
             uint8_t val = gpio_get_level(BOOT_GPIO_PIN);
             static uint8_t debounce_cnt = 0;
@@ -423,18 +469,57 @@ static void ui_update_task(void *arg)
             if (boot_last == 1 && curr == 0)
             {
                 ESP_LOGI(TAG, "BOOT pressed (GPIO35)");
+                ami_selection = 0;
+                ami_show_selection(ami_selection);
+                loadScreen(SCREEN_ID_AMI);
+            }
+            boot_last = curr;
+        }
 
-                if (active_scr == objects.ami)
+        /* === 旋钮：主界面左/右选择，按下确认 === */
+#if ROTARY_INPUT_ENABLE
+        {
+            rotary_event_t event;
+            while (rotary_input_get_event(&event, 0))
+            {
+                if (active_scr != objects.ami)
+                    continue;
+
+                if (event == ROTARY_EVENT_LEFT)
+                {
+                    ami_selection = (ami_selection == UINT8_MAX || ami_selection == 0)
+                                        ? (AMI_SELECTION_COUNT - 1)
+                                        : (uint8_t)(ami_selection - 1);
+                    ami_show_selection(ami_selection);
+                    ESP_LOGI(TAG, "Rotary left, selection=%u", ami_selection);
+                }
+                else if (event == ROTARY_EVENT_RIGHT)
                 {
                     ami_selection = (ami_selection == UINT8_MAX)
                                         ? 0
                                         : (uint8_t)((ami_selection + 1) % AMI_SELECTION_COUNT);
                     ami_show_selection(ami_selection);
-                    ESP_LOGI(TAG, "AMI selection=%u", ami_selection);
+                    ESP_LOGI(TAG, "Rotary right, selection=%u", ami_selection);
+                }
+                else if (event == ROTARY_EVENT_PRESS && ami_selection != UINT8_MAX)
+                {
+                    if (ami_selection == AMI_SELECTION_COUNT - 1)
+                    {
+                        inspect_stage = 0;
+                        inspect_led_on = false;
+                        inspect_blink_tick = xTaskGetTickCount();
+                        inspect_show_stage(inspect_stage);
+                        loadScreen(SCREEN_ID_INSPECT);
+                    }
+                    else
+                    {
+                        loadScreen(SCREEN_ID_AUTONOMOUS);
+                    }
+                    ESP_LOGI(TAG, "Rotary press, selection=%u", ami_selection);
                 }
             }
-            boot_last = curr;
         }
+#endif
 
         /* === EXIO9：确认主页面任务 === */
         {
@@ -540,6 +625,17 @@ static void ui_update_task(void *arg)
  */
 void app_main(void)
 {
+#if GPIO13_HIGH_LEVEL_TEST
+    gpio13_high_level_test();
+    return;
+#endif
+
+#if WS2815_FULL_RED_TEST
+    /* Keep this before every other peripheral initialisation for a focused RMT test. */
+    ws2815_full_red_test();
+    return;
+#endif
+
 #if LCD_MINIMAL_TEST
     /*
      * 硬件第一阶段必须先于 USB：若 USB CDC 配置或枚举失败，仍可判断芯片
@@ -586,6 +682,20 @@ void app_main(void)
     g_rpm_mutex = xSemaphoreCreateMutex();
     assert(g_rpm_mutex);
 
+    /* 16-LED tachometer uses the VCU/MCU speed field updated in the CAN callback. */
+    ws2815_rpm_bar_start(&g_current_rpm);
+
+    /* Keep the tachometer independent of LCD/LVGL initialisation. */
+    ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);
+    if (bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_data_callback) == 0)
+    {
+        ESP_LOGI(TAG, "CAN initialized successfully");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "CAN initialization failed; RPM bar remains in standby");
+    }
+
     /* 初始化I2C总线 (XL9555 IO扩展器使用) */
     ret = myiic_init();
     if (ret != ESP_OK)
@@ -621,16 +731,13 @@ void app_main(void)
     /* 初始化LVGL显示 */
     lvgl_demo(); /* 运行LVGL例程 */
 
-    /* 初始化CAN (TWAI) */
-    ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);
-    if (bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_data_callback) == 0)
-    {
-        ESP_LOGI(TAG, "CAN initialized successfully");
-    }
-    else
-    {
-        ESP_LOGW(TAG, "CAN initialization failed, UI will still work");
-    }
+    /*
+     * GPIO3还用于LCD RGB识别(M2)，因此旋钮必须放在lvgl_demo()之后初始化；
+     * 否则旋钮模块的VCC/上拉会改变LCD识别电平，导致MIPI屏被误判为RGB屏。
+     */
+#if ROTARY_INPUT_ENABLE
+    ESP_ERROR_CHECK(rotary_input_init());
+#endif
 
     /* 创建UI更新任务 */
     xTaskCreatePinnedToCore(

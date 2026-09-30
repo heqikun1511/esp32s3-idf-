@@ -4,13 +4,16 @@ idf_component_register(
         "APP" 
         "ui"
         "BSP" 
+        "ws2815"
     INCLUDE_DIRS 
         "."
         "APP"
         "ui"
         "BSP"
+        "ws2815"
     REQUIRES
         driver
+        esp_driver_rmt
         nvs_flash
         esp_timer
         BSP)
