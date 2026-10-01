@@ -6,7 +6,6 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
-#include <limits.h>
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
@@ -47,11 +46,19 @@ static const char *TAG = "MAIN";
 /* GPIO13 WS2812 board wiring test: hold the data pin at a steady 3.3 V. */
 #define GPIO13_HIGH_LEVEL_TEST 0
 
-/* GPIO13 WS2812 test mode: all 16 LEDs remain at full-bright red. */
-#define WS2815_FULL_RED_TEST 0
+/* GPIO13 WS2812 test mode: all 16 LEDs remain at full-bright yellow. */
+#define WS2815_FULL_YELLOW_TEST 0
 
 /* LCD识别和初始化完成后启用KEY2/KEY3/KEY4旋钮(GPIO3/4/5)。 */
 #define ROTARY_INPUT_ENABLE 1
+
+/* 板内转速演示：1=自动循环0~5000 RPM，0=只使用真实CAN报文。 */
+#define RPM_INTERNAL_DEMO_ENABLE 1
+#define RPM_DEMO_STEP             25
+#define RPM_DEMO_STEP_MS          20
+#define RPM_DEMO_ENDPOINT_HOLD_MS 1000
+#define RPM_DEMO_YELLOW_HOLD_RPM  3250
+#define RPM_DEMO_YELLOW_HOLD_MS   1200
 
 typedef struct
 {
@@ -296,24 +303,79 @@ static void can_data_callback(uint32_t can_id, uint8_t *data, uint8_t len)
         break;
     }
 
-    /* 转速灯使用最近一帧目标或实际转速；状态1到达时实际值优先更新。 */
-    if (can_id == MCU_TO_VCU_STATUS1_ID ||
-        (can_id == VCU_TO_MCU_CMD_ID && !g_motor_can_data.status1_valid))
-    {
-        g_current_rpm = (int)parsed_rpm;
-    }
     if (g_rpm_mutex)
         xSemaphoreGive(g_rpm_mutex);
 
-    static uint32_t last_log_id = UINT32_MAX;
-    static float last_logged_rpm = -100000.0f;
-    if (can_id != last_log_id || parsed_rpm != last_logged_rpm)
+    /* 高频转速帧只保留DEBUG日志，避免串口输出阻塞UI刷新。 */
+    if (can_id != MCU_TO_VCU_STATUS2_ID)
+        ESP_LOGD(TAG, "CAN ID=0x%08X, parsed RPM=%.1f", can_id, parsed_rpm);
+}
+
+#if RPM_INTERNAL_DEMO_ENABLE
+/*
+ * 通过正式CAN解析入口注入测试帧，使仪表和WS2815转速灯使用完全相同的数据链路。
+ * 序列为0 -> 5000 -> 0 RPM；使用20ms细步进形成连续变化。
+ * 端点及完整黄色灯区会停留，便于观察待机、五颗黄灯和红色爆闪。
+ */
+static void rpm_internal_demo_task(void *arg)
+{
+    int rpm = 0;
+    int direction = 1;
+
+    const uint8_t status2_demo[8] = {
+        95, 100,             /* 控制器45 C，电机50 C */
+        0xA0, 0x0F,         /* DC母线400.0 V */
+        0xE4, 0x3E,         /* DC电流10.0 A */
+        0x74, 0x40          /* AC RMS电流50.0 A */
+    };
+
+    while (1)
     {
-        ESP_LOGI(TAG, "CAN ID=0x%08X, parsed RPM=%.1f", can_id, parsed_rpm);
-        last_log_id = can_id;
-        last_logged_rpm = parsed_rpm;
+        uint16_t raw_rpm = (uint16_t)((rpm + 10000) * 2);
+        uint8_t command[8] = {
+            (uint8_t)(raw_rpm & 0xFF), (uint8_t)(raw_rpm >> 8),
+            0x00, 0x00,     /* 扭矩0 */
+            0x04,           /* 速度模式 */
+            0x0A,           /* 前进挡，主接触器闭合 */
+            0xA0, 0x0F      /* 命令母线400.0 V */
+        };
+        uint8_t status1[8] = {
+            (uint8_t)(raw_rpm & 0xFF), (uint8_t)(raw_rpm >> 8),
+            0x00, 0x00,     /* 实际扭矩0 */
+            0x04,           /* 速度模式 */
+            0x01,           /* MCU ready */
+            0x80,           /* 自检完成 */
+            0x00            /* 无综合报警 */
+        };
+
+        can_data_callback(VCU_TO_MCU_CMD_ID, command, sizeof(command));
+        can_data_callback(MCU_TO_VCU_STATUS1_ID, status1, sizeof(status1));
+        can_data_callback(MCU_TO_VCU_STATUS2_ID, (uint8_t *)status2_demo, sizeof(status2_demo));
+
+        if ((rpm % 500) == 0 || rpm == RPM_DEMO_YELLOW_HOLD_RPM)
+            ESP_LOGI(TAG, "RPM demo: %d", rpm);
+
+        TickType_t delay = pdMS_TO_TICKS(RPM_DEMO_STEP_MS);
+        if (rpm == 0 || rpm == 5000)
+            delay = pdMS_TO_TICKS(RPM_DEMO_ENDPOINT_HOLD_MS);
+        else if (rpm == RPM_DEMO_YELLOW_HOLD_RPM)
+            delay = pdMS_TO_TICKS(RPM_DEMO_YELLOW_HOLD_MS);
+        vTaskDelay(delay);
+
+        rpm += direction * RPM_DEMO_STEP;
+        if (rpm >= 5000)
+        {
+            rpm = 5000;
+            direction = -1;
+        }
+        else if (rpm <= 0)
+        {
+            rpm = 0;
+            direction = 1;
+        }
     }
 }
+#endif
 
 #define AMI_SELECTION_COUNT 6
 #define INSPECT_STAGE_COUNT 5
@@ -412,12 +474,12 @@ static float smooth_step(float current, float target)
     return current + 0.12f * (target - current);
 }
 
-static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool online)
+static void motor_display_smooth_update(const motor_can_data_t *data)
 {
-    if (!data || !objects.autonomous)
+    if (!data)
         return;
 
-    /* 首帧直接对齐，之后每次UI刷新向最新CAN目标插值12%。 */
+    /* 首帧直接对齐，之后每20ms向最新CAN目标插值12%。 */
     if (data->command_valid)
     {
         if (!s_motor_display.command_valid)
@@ -468,6 +530,21 @@ static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool o
             s_motor_display.ac_rms_current = smooth_step(s_motor_display.ac_rms_current, data->ac_rms_current);
         }
     }
+
+    /* 仪表和实体转速灯共享同一个插值后的RPM，保证两者同步。 */
+    float displayed_rpm = 0.0f;
+    if (s_motor_display.status1_valid)
+        displayed_rpm = s_motor_display.actual_rpm;
+    else if (s_motor_display.command_valid)
+        displayed_rpm = s_motor_display.command_rpm;
+    g_current_rpm = (int)(displayed_rpm >= 0.0f ? displayed_rpm + 0.5f
+                                               : displayed_rpm - 0.5f);
+}
+
+static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool online)
+{
+    if (!data || !objects.autonomous)
+        return;
 
     /* These dashboard values have no field in the motor-controller frames. */
     label_set_if_changed(objects.batt, "--"); /* SOC is not sent in these IDs. */
@@ -739,6 +816,9 @@ static void ui_update_task(void *arg)
             xSemaphoreGive(g_rpm_mutex);
         }
 
+        /* 无论当前显示哪个页面，都持续更新仪表/灯条共用的平滑转速。 */
+        motor_display_smooth_update(&can_data);
+
         /* === 检测当前显示的屏幕 === */
         lv_obj_t *active_scr = lv_scr_act();
 
@@ -955,9 +1035,9 @@ void app_main(void)
     return;
 #endif
 
-#if WS2815_FULL_RED_TEST
+#if WS2815_FULL_YELLOW_TEST
     /* Keep this before every other peripheral initialisation for a focused RMT test. */
-    ws2815_full_red_test();
+    ws2815_full_yellow_test();
     return;
 #endif
 
@@ -1076,6 +1156,18 @@ void app_main(void)
         3,
         NULL,
         tskNO_AFFINITY);
+
+#if RPM_INTERNAL_DEMO_ENABLE
+    xTaskCreatePinnedToCore(
+        rpm_internal_demo_task,
+        "rpm_demo",
+        3072,
+        NULL,
+        2,
+        NULL,
+        tskNO_AFFINITY);
+    ESP_LOGW(TAG, "Internal RPM demo enabled: 0 -> 5000 -> 0 RPM");
+#endif
 
     ESP_LOGI(TAG, "System started");
 }

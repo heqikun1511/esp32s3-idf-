@@ -13,7 +13,6 @@
 #define WS2815_TEST_GPIO          GPIO_NUM_13
 #define WS2815_TEST_LED_COUNT     16
 #define WS2815_RMT_RESOLUTION_HZ  (10 * 1000 * 1000)
-#define WS2815_FAST_BLINK_MS      100
 
 /* 0--5000 rpm display calibration. The final pre-limit red zone is 500 rpm. */
 #define RPM_START                  500
@@ -24,6 +23,9 @@
 #define RPM_BAR_REFRESH_MS         20
 #define RPM_SHIFT_FLASH_HALF_MS    70   /* about 7 Hz */
 #define RPM_LIMIT_FLASH_HALF_MS    45   /* about 11 Hz */
+#define WS2815_STARTUP_SELF_TEST    0
+#define LED_SELF_TEST_COLOR_MS     500
+#define LED_SELF_TEST_CHASE_MS     100
 
 static const char *TAG = "WS2815_TEST";
 
@@ -88,7 +90,8 @@ static void ws2815_rpm_bar_frame(uint8_t *pixels, int rpm, TickType_t now)
         } else if (led_rpm >= RPM_ORANGE) {
             ws2815_set_rgb(pixels, i, 180, 55, 0);
         } else if (led_rpm >= RPM_YELLOW) {
-            ws2815_set_rgb(pixels, i, 130, 130, 0);
+            /* Full yellow was verified on all 16 physical LEDs. */
+            ws2815_set_rgb(pixels, i, 255, 255, 0);
         } else {
             ws2815_set_rgb(pixels, i, 0, 130, 0);
         }
@@ -119,6 +122,30 @@ static void ws2815_rpm_bar_task(void *arg)
     ESP_LOGI(TAG, "RPM bar active: %d LEDs, %d rpm limit", WS2815_TEST_LED_COUNT,
              RPM_LIMIT);
     uint8_t pixels[WS2815_TEST_LED_COUNT * 3];
+
+#if WS2815_STARTUP_SELF_TEST
+    /* 上电全色和逐颗自检；正常工程保持关闭。 */
+    const uint8_t test_colors[][3] = {
+        {255, 0, 0}, {0, 255, 0}, {255, 255, 0}, {0, 0, 255}
+    };
+    for (size_t color = 0; color < sizeof(test_colors) / sizeof(test_colors[0]); ++color) {
+        for (size_t led = 0; led < WS2815_TEST_LED_COUNT; ++led) {
+            ws2815_set_rgb(pixels, led,
+                           test_colors[color][0],
+                           test_colors[color][1],
+                           test_colors[color][2]);
+        }
+        ws2815_send_frame(channel, encoder, pixels);
+        vTaskDelay(pdMS_TO_TICKS(LED_SELF_TEST_COLOR_MS));
+    }
+    for (size_t led = 0; led < WS2815_TEST_LED_COUNT; ++led) {
+        memset(pixels, 0, sizeof(pixels));
+        ws2815_set_rgb(pixels, led, 255, 255, 255);
+        ws2815_send_frame(channel, encoder, pixels);
+        vTaskDelay(pdMS_TO_TICKS(LED_SELF_TEST_CHASE_MS));
+    }
+#endif
+
     for (;;) {
         ws2815_rpm_bar_frame(pixels, *rpm_source, xTaskGetTickCount());
         ws2815_send_frame(channel, encoder, pixels);
@@ -152,7 +179,7 @@ void gpio13_high_level_test(void)
     }
 }
 
-void ws2815_full_red_test(void)
+void ws2815_full_yellow_test(void)
 {
     rmt_channel_handle_t channel = NULL;
     rmt_encoder_handle_t encoder = NULL;
@@ -173,31 +200,21 @@ void ws2815_full_red_test(void)
     ESP_ERROR_CHECK(ws2815_new_rmt_encoder(&encoder_config, &encoder));
     ESP_ERROR_CHECK(rmt_enable(channel));
 
-    /*
-     * This board's LED chain uses RGB byte order (verified on hardware):
-     * FF 00 00 is full-bright red.  The usual WS281x GRB order displayed green.
-     */
+    /* This board's LED chain uses RGB byte order; FF FF 00 is full yellow. */
     uint8_t pixels[WS2815_TEST_LED_COUNT * 3];
     for (size_t i = 0; i < WS2815_TEST_LED_COUNT; ++i) {
         pixels[i * 3 + 0] = 255;
-        pixels[i * 3 + 1] = 0;
+        pixels[i * 3 + 1] = 255;
         pixels[i * 3 + 2] = 0;
     }
 
-    uint8_t off_pixels[WS2815_TEST_LED_COUNT * 3] = {0};
     const rmt_transmit_config_t tx_config = { .loop_count = 0 };
-    ESP_LOGW(TAG, "GPIO%d: %u LEDs fast-blinking full red", WS2815_TEST_GPIO,
+    ESP_LOGW(TAG, "GPIO%d: %u LEDs steady full yellow", WS2815_TEST_GPIO,
              WS2815_TEST_LED_COUNT);
     for (;;) {
-        /* All LEDs on: RGB = FF 00 00 (full red on this board). */
+        /* Periodically resend the steady full-yellow frame. */
         ESP_ERROR_CHECK(rmt_transmit(channel, encoder, pixels, sizeof(pixels), &tx_config));
         ESP_ERROR_CHECK(rmt_tx_wait_all_done(channel, portMAX_DELAY));
-
-        vTaskDelay(pdMS_TO_TICKS(WS2815_FAST_BLINK_MS));
-
-        /* All LEDs off: GRB = 00 00 00. */
-        ESP_ERROR_CHECK(rmt_transmit(channel, encoder, off_pixels, sizeof(off_pixels), &tx_config));
-        ESP_ERROR_CHECK(rmt_tx_wait_all_done(channel, portMAX_DELAY));
-        vTaskDelay(pdMS_TO_TICKS(WS2815_FAST_BLINK_MS));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

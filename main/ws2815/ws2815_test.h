@@ -1,7 +1,7 @@
 #pragma once
 
-/* Runs the GPIO13 WS2815B test and keeps every configured LED at full red. */
-void ws2815_full_red_test(void);
+/* Runs the GPIO13 WS2815B test and keeps every configured LED at full yellow. */
+void ws2815_full_yellow_test(void);
 
 /* Starts the 16-LED RPM bar; rpm_source is updated by the CAN receive path. */
 void ws2815_rpm_bar_start(volatile int *rpm_source);
