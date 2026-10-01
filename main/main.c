@@ -6,6 +6,7 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
@@ -47,12 +48,39 @@ static const char *TAG = "MAIN";
 #define GPIO13_HIGH_LEVEL_TEST 0
 
 /* GPIO13 WS2812 test mode: all 16 LEDs remain at full-bright red. */
-#define WS2815_FULL_RED_TEST 1
+#define WS2815_FULL_RED_TEST 0
 
-/* LCD初始化完成后启用KEY2/KEY3/KEY4旋钮(GPIO3/4/5)。 */
-#define ROTARY_INPUT_ENABLE 0
+/* LCD识别和初始化完成后启用KEY2/KEY3/KEY4旋钮(GPIO3/4/5)。 */
+#define ROTARY_INPUT_ENABLE 1
 
-/* 当前转速值(由CAN回调更新, 由LVGL任务读取) */
+typedef struct
+{
+    float command_rpm;
+    uint16_t command_torque_permille;
+    uint8_t command_mode;
+    uint8_t command_gear;
+    bool command_main_contactor;
+    float command_bus_voltage;
+    bool command_valid;
+
+    float actual_rpm;
+    uint16_t actual_torque_permille;
+    uint8_t actual_mode;
+    uint8_t status_flags;
+    uint8_t alarm_flags;
+    uint8_t combined_alarm;
+    bool status1_valid;
+
+    int controller_temp_c;
+    int motor_temp_c;
+    float dc_bus_voltage;
+    float dc_bus_current;
+    float ac_rms_current;
+    bool status2_valid;
+} motor_can_data_t;
+
+/* CAN回调更新协议快照；UI和转速灯任务读取快照。 */
+static motor_can_data_t g_motor_can_data;
 static volatile int g_current_rpm = 0;
 static volatile bool g_can_rx_seen = false;
 static volatile TickType_t g_last_can_rx_tick = 0;
@@ -203,50 +231,357 @@ static void lcd_minimal_test(void)
  */
 static void can_data_callback(uint32_t can_id, uint8_t *data, uint8_t len)
 {
-    /* 任意有效CAN帧都用于刷新通信在线时间。 */
-    if (data && len > 0)
-    {
-        g_last_can_rx_tick = xTaskGetTickCount();
-
-        g_can_rx_seen = true;
-    }
-
-    /* 检查数据长度 */
-    if (!data || len < 2)
+    if (!data)
         return;
 
-    int rpm = 0;
+    /* 本协议的三种电机报文均为8字节；截短报文不进入信号解析。 */
+    if (len < 8)
+        return;
+
+    const uint16_t value_01 = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+    const uint16_t value_23 = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    float parsed_rpm = ((float)value_01 * 0.5f) - 10000.0f;
+    if (can_id != VCU_TO_MCU_CMD_ID &&
+        can_id != MCU_TO_VCU_STATUS1_ID &&
+        can_id != MCU_TO_VCU_STATUS2_ID)
+        return;
+
+    g_last_can_rx_tick = xTaskGetTickCount();
+    g_can_rx_seen = true;
+
+    if (g_rpm_mutex)
+        xSemaphoreTake(g_rpm_mutex, portMAX_DELAY);
 
     switch (can_id)
     {
     case VCU_TO_MCU_CMD_ID:
-        /* VCU→MCU 电机控制命令: 字节1-2为转速值 */
-        rpm = bsp_can_parse_speed(data[0], data[1]);
-        ESP_LOGD(TAG, "VCU→MCU speed: %d rpm", rpm);
+        /* byte1-2 RPM, byte3-4 torque, byte5 mode, byte6 gear/contactor,
+         * byte7-8 DC bus voltage.  Multibyte values are little-endian. */
+        g_motor_can_data.command_rpm = parsed_rpm;
+        g_motor_can_data.command_torque_permille = value_23;
+        g_motor_can_data.command_mode = data[4];
+        g_motor_can_data.command_gear = data[5] & 0x03;
+        g_motor_can_data.command_main_contactor = (data[5] & 0x08) != 0;
+        g_motor_can_data.command_bus_voltage =
+            ((uint16_t)data[6] | ((uint16_t)data[7] << 8)) * 0.1f;
+        g_motor_can_data.command_valid = true;
         break;
 
     case MCU_TO_VCU_STATUS1_ID:
-        /* MCU→VCU 电机状态信息1: 字节1-2为转速值 */
-        rpm = bsp_can_parse_speed(data[0], data[1]);
-        ESP_LOGD(TAG, "MCU→VCU speed: %d rpm", rpm);
+        /* byte6 controller state; byte7 temperature alarms/self-test;
+         * byte8 combined alarm. */
+        g_motor_can_data.actual_rpm = parsed_rpm;
+        g_motor_can_data.actual_torque_permille = value_23;
+        g_motor_can_data.actual_mode = data[4];
+        g_motor_can_data.status_flags = data[5];
+        g_motor_can_data.alarm_flags = data[6];
+        g_motor_can_data.combined_alarm = data[7] & 0x03;
+        g_motor_can_data.status1_valid = true;
         break;
 
-    default:
-        /* 其他报文忽略 */
-        return;
+    case MCU_TO_VCU_STATUS2_ID: {
+        /* Temperatures use -50 C offset; current uses 0.1 A/bit, -1600 A offset. */
+        uint16_t dc_current_raw = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+        uint16_t ac_current_raw = (uint16_t)data[6] | ((uint16_t)data[7] << 8);
+        g_motor_can_data.controller_temp_c = (int)data[0] - 50;
+        g_motor_can_data.motor_temp_c = (int)data[1] - 50;
+        g_motor_can_data.dc_bus_voltage = value_23 * 0.1f;
+        g_motor_can_data.dc_bus_current = dc_current_raw * 0.1f - 1600.0f;
+        g_motor_can_data.ac_rms_current = ac_current_raw * 0.1f - 1600.0f;
+        g_motor_can_data.status2_valid = true;
+        break;
     }
 
-    /* 更新转速值(带保护) */
-    if (g_rpm_mutex)
+    default:
+        break;
+    }
+
+    /* 转速灯使用最近一帧目标或实际转速；状态1到达时实际值优先更新。 */
+    if (can_id == MCU_TO_VCU_STATUS1_ID ||
+        (can_id == VCU_TO_MCU_CMD_ID && !g_motor_can_data.status1_valid))
     {
-        xSemaphoreTake(g_rpm_mutex, portMAX_DELAY);
-        g_current_rpm = rpm;
+        g_current_rpm = (int)parsed_rpm;
+    }
+    if (g_rpm_mutex)
         xSemaphoreGive(g_rpm_mutex);
+
+    static uint32_t last_log_id = UINT32_MAX;
+    static float last_logged_rpm = -100000.0f;
+    if (can_id != last_log_id || parsed_rpm != last_logged_rpm)
+    {
+        ESP_LOGI(TAG, "CAN ID=0x%08X, parsed RPM=%.1f", can_id, parsed_rpm);
+        last_log_id = can_id;
+        last_logged_rpm = parsed_rpm;
     }
 }
 
 #define AMI_SELECTION_COUNT 6
 #define INSPECT_STAGE_COUNT 5
+
+static lv_obj_t *s_can_dashboard;
+static lv_obj_t *s_can_dashboard_text;
+
+static void autonomous_can_dashboard_init(void)
+{
+    if (!lvgl_port_lock(portMAX_DELAY))
+        return;
+
+    if (!s_can_dashboard)
+    {
+        /* CAN接收调试面板使用独立LVGL screen，不侵入原AUTONOMOUS界面。 */
+        s_can_dashboard = lv_obj_create(NULL);
+        lv_obj_set_size(s_can_dashboard, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_style_bg_color(s_can_dashboard, lv_color_hex(0x070b10), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_can_dashboard, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_pos(s_can_dashboard, 0, 0);
+
+        lv_obj_t *card = lv_obj_create(s_can_dashboard);
+        lv_obj_set_pos(card, 470, 75);
+        lv_obj_set_size(card, 980, 560);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(card, lv_color_hex(0x39ff65), LV_PART_MAIN);
+        lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+
+        s_can_dashboard_text = lv_label_create(card);
+        lv_obj_set_pos(s_can_dashboard_text, 0, 0);
+        lv_obj_set_size(s_can_dashboard_text, 940, 520);
+        lv_obj_set_style_text_color(s_can_dashboard_text, lv_color_hex(0xe8edf2), LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_can_dashboard_text, &ui_font_orbitron_bold_20, LV_PART_MAIN);
+        lv_label_set_text(s_can_dashboard_text, "MOTOR CAN\nWaiting for CAN data...");
+    }
+
+    lvgl_port_unlock();
+}
+
+static const char *motor_mode_name(uint8_t mode, char *buffer, size_t size)
+{
+    buffer[0] = '\0';
+    const struct { uint8_t bit; const char *name; } modes[] = {
+        {0, "FREE"}, {1, "TORQUE"}, {2, "SPEED"}, {3, "BRAKE"},
+        {4, "ZEROLOCK"}, {7, "FAULT"},
+    };
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
+    {
+        if (mode & (1U << modes[i].bit))
+        {
+            if (buffer[0] != '\0')
+                strlcat(buffer, "/", size);
+            strlcat(buffer, modes[i].name, size);
+        }
+    }
+    if (buffer[0] == '\0')
+        strlcpy(buffer, "NORMAL", size);
+    return buffer;
+}
+
+static const char *motor_gear_name(uint8_t gear)
+{
+    switch (gear & 0x03)
+    {
+    case 0: return "NEUTRAL";
+    case 1: return "REVERSE";
+    case 2: return "FORWARD";
+    default: return "INVALID";
+    }
+}
+
+static void label_set_if_changed(lv_obj_t *label, const char *text)
+{
+    if (label && strcmp(lv_label_get_text(label), text) != 0)
+        lv_label_set_text(label, text);
+}
+
+/* UI数字显示使用一阶插值；CAN解析快照本身不被滤波，控制/故障逻辑不受影响。 */
+typedef struct
+{
+    float command_rpm, command_torque, command_bus_voltage;
+    float actual_rpm, actual_torque;
+    float controller_temp, motor_temp, dc_bus_voltage, dc_bus_current, ac_rms_current;
+    bool command_valid, status1_valid, status2_valid;
+} motor_display_smooth_t;
+
+static motor_display_smooth_t s_motor_display;
+
+static float smooth_step(float current, float target)
+{
+    /* UI每20ms调用一次，alpha=0.12对应约150ms的平滑时间常数。 */
+    return current + 0.12f * (target - current);
+}
+
+static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool online)
+{
+    if (!data || !objects.autonomous)
+        return;
+
+    /* 首帧直接对齐，之后每次UI刷新向最新CAN目标插值12%。 */
+    if (data->command_valid)
+    {
+        if (!s_motor_display.command_valid)
+        {
+            s_motor_display.command_rpm = data->command_rpm;
+            s_motor_display.command_torque = data->command_torque_permille;
+            s_motor_display.command_bus_voltage = data->command_bus_voltage;
+            s_motor_display.command_valid = true;
+        }
+        else
+        {
+            s_motor_display.command_rpm = smooth_step(s_motor_display.command_rpm, data->command_rpm);
+            s_motor_display.command_torque = smooth_step(s_motor_display.command_torque, data->command_torque_permille);
+            s_motor_display.command_bus_voltage = smooth_step(s_motor_display.command_bus_voltage, data->command_bus_voltage);
+        }
+    }
+    if (data->status1_valid)
+    {
+        if (!s_motor_display.status1_valid)
+        {
+            s_motor_display.actual_rpm = data->actual_rpm;
+            s_motor_display.actual_torque = data->actual_torque_permille;
+            s_motor_display.status1_valid = true;
+        }
+        else
+        {
+            s_motor_display.actual_rpm = smooth_step(s_motor_display.actual_rpm, data->actual_rpm);
+            s_motor_display.actual_torque = smooth_step(s_motor_display.actual_torque, data->actual_torque_permille);
+        }
+    }
+    if (data->status2_valid)
+    {
+        if (!s_motor_display.status2_valid)
+        {
+            s_motor_display.controller_temp = data->controller_temp_c;
+            s_motor_display.motor_temp = data->motor_temp_c;
+            s_motor_display.dc_bus_voltage = data->dc_bus_voltage;
+            s_motor_display.dc_bus_current = data->dc_bus_current;
+            s_motor_display.ac_rms_current = data->ac_rms_current;
+            s_motor_display.status2_valid = true;
+        }
+        else
+        {
+            s_motor_display.controller_temp = smooth_step(s_motor_display.controller_temp, data->controller_temp_c);
+            s_motor_display.motor_temp = smooth_step(s_motor_display.motor_temp, data->motor_temp_c);
+            s_motor_display.dc_bus_voltage = smooth_step(s_motor_display.dc_bus_voltage, data->dc_bus_voltage);
+            s_motor_display.dc_bus_current = smooth_step(s_motor_display.dc_bus_current, data->dc_bus_current);
+            s_motor_display.ac_rms_current = smooth_step(s_motor_display.ac_rms_current, data->ac_rms_current);
+        }
+    }
+
+    /* These dashboard values have no field in the motor-controller frames. */
+    label_set_if_changed(objects.batt, "--"); /* SOC is not sent in these IDs. */
+    label_set_if_changed(objects.lv_volt, "--");
+    label_set_if_changed(objects.lv_a, "--");
+
+    char report[768];
+    char mode[96], actual_mode[96];
+    char cmd_rpm[20], cmd_torque[20], cmd_bus[20];
+    char actual_rpm[20], actual_torque[20];
+    char controller_temp[20], motor_temp[20], dc_bus[20], dc_current[20], ac_current[20];
+    const char *alarm_name[] = {"NORMAL", "WARN-L3", "LIMIT-L2", "STOP-L1"};
+    bool rpm_valid = data->status1_valid || data->command_valid;
+
+    if (data->command_valid) {
+        snprintf(cmd_rpm, sizeof(cmd_rpm), "%.1f", s_motor_display.command_rpm);
+        snprintf(cmd_torque, sizeof(cmd_torque), "%.1f", s_motor_display.command_torque);
+        snprintf(cmd_bus, sizeof(cmd_bus), "%.1f", s_motor_display.command_bus_voltage);
+    } else {
+        strlcpy(cmd_rpm, "--", sizeof(cmd_rpm));
+        strlcpy(cmd_torque, "--", sizeof(cmd_torque));
+        strlcpy(cmd_bus, "--", sizeof(cmd_bus));
+    }
+    if (data->status1_valid) {
+        snprintf(actual_rpm, sizeof(actual_rpm), "%.1f", s_motor_display.actual_rpm);
+        snprintf(actual_torque, sizeof(actual_torque), "%.1f", s_motor_display.actual_torque);
+    } else {
+        strlcpy(actual_rpm, "--", sizeof(actual_rpm));
+        strlcpy(actual_torque, "--", sizeof(actual_torque));
+    }
+    if (data->status2_valid) {
+        snprintf(controller_temp, sizeof(controller_temp), "%.1f", s_motor_display.controller_temp);
+        snprintf(motor_temp, sizeof(motor_temp), "%.1f", s_motor_display.motor_temp);
+        snprintf(dc_bus, sizeof(dc_bus), "%.1f", s_motor_display.dc_bus_voltage);
+        snprintf(dc_current, sizeof(dc_current), "%.1f", s_motor_display.dc_bus_current);
+        snprintf(ac_current, sizeof(ac_current), "%.1f", s_motor_display.ac_rms_current);
+    } else {
+        strlcpy(controller_temp, "--", sizeof(controller_temp));
+        strlcpy(motor_temp, "--", sizeof(motor_temp));
+        strlcpy(dc_bus, "--", sizeof(dc_bus));
+        strlcpy(dc_current, "--", sizeof(dc_current));
+        strlcpy(ac_current, "--", sizeof(ac_current));
+    }
+
+    snprintf(report, sizeof(report),
+        "MOTOR CAN  %s\n"
+        "VCU RPM %s  TQ %s/1000\n"
+        "VCU MODE %s\n"
+        "GEAR %s  CONTACTOR %s\n"
+        "CMD BUS %s V\n"
+        "MCU RPM %s  TQ %s/1000\n"
+        "MCU MODE %s\n"
+        "READY %s PRECHG %s SELFTEST %s\n"
+        "FLT R:%s OC:%s OV:%s C:%s U:%s P:%s\n"
+        "TEMP ALARM C:%s M:%s  %s\n"
+        "CTRL TEMP %s C  MOTOR TEMP %s C\n"
+        "DC BUS %s V  DC I %s A\n"
+        "AC RMS I %s A",
+        online ? "ONLINE" : "NO FRAMES",
+        cmd_rpm, cmd_torque,
+        data->command_valid ? motor_mode_name(data->command_mode, mode, sizeof(mode)) : "--",
+        data->command_valid ? motor_gear_name(data->command_gear) : "--",
+        data->command_valid ? (data->command_main_contactor ? "CLOSED" : "OPEN") : "--",
+        cmd_bus,
+        actual_rpm, actual_torque,
+        data->status1_valid ? motor_mode_name(data->actual_mode, actual_mode, sizeof(actual_mode)) : "--",
+        data->status1_valid ? ((data->status_flags & 0x01) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x02) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->alarm_flags & 0x80) ? "DONE" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x04) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x08) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x10) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x20) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x40) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->status_flags & 0x80) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->alarm_flags & 0x01) ? "YES" : "NO") : "--",
+        data->status1_valid ? ((data->alarm_flags & 0x02) ? "YES" : "NO") : "--",
+        data->status1_valid ? alarm_name[data->combined_alarm & 0x03] : "--",
+        controller_temp, motor_temp, dc_bus, dc_current, ac_current);
+
+    if (s_can_dashboard_text)
+        label_set_if_changed(s_can_dashboard_text, report);
+
+    char buf[32];
+    if (rpm_valid)
+    {
+        snprintf(buf, sizeof(buf), "%.1f", data->status1_valid ? s_motor_display.actual_rpm : s_motor_display.command_rpm);
+        label_set_if_changed(objects.speed_label_3, buf);
+    }
+    else
+        label_set_if_changed(objects.speed_label_3, "--");
+
+    if (data->status2_valid)
+    {
+        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.motor_temp);
+        label_set_if_changed(objects.motor_tem, buf);
+        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.controller_temp);
+        label_set_if_changed(objects.rotating_speed, buf);
+        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.dc_bus_voltage);
+        label_set_if_changed(objects.ts_volt, buf);
+        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.dc_bus_current);
+        label_set_if_changed(objects.ts_a, buf);
+        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.dc_bus_voltage * s_motor_display.dc_bus_current / 1000.0f);
+        label_set_if_changed(objects.__, buf);
+    }
+    else
+    {
+        label_set_if_changed(objects.motor_tem, "--");
+        label_set_if_changed(objects.rotating_speed, "--");
+        label_set_if_changed(objects.ts_volt, "--");
+        label_set_if_changed(objects.ts_a, "--");
+        label_set_if_changed(objects.__, "--");
+    }
+}
 
 #define ASSI_OFF_COLOR 0x68717d
 #define ASSI_YELLOW_COLOR 0xffd400
@@ -380,9 +715,6 @@ static void inspect_show_stage(uint8_t stage)
  */
 static void ui_update_task(void *arg)
 {
-    int last_rpm = -1;
-    int last_speed = -1; /* 用于车速显示(0-120) */
-    char buf[16];
     uint8_t boot_last = 1;
     uint8_t extio9_last = 1;
     uint8_t extio10_last = 1;
@@ -397,35 +729,14 @@ static void ui_update_task(void *arg)
 
     while (1)
     {
-        int current_rpm = 0;
+        motor_can_data_t can_data = {0};
 
-        /* 读取当前转速值 */
+        /* 在同一临界区复制协议数据快照。 */
         if (g_rpm_mutex)
         {
             xSemaphoreTake(g_rpm_mutex, portMAX_DELAY);
-            current_rpm = g_current_rpm;
+            can_data = g_motor_can_data;
             xSemaphoreGive(g_rpm_mutex);
-        }
-
-        /* 仅在数值变化时更新UI, 减少LVGL刷新 */
-        if (current_rpm != last_rpm)
-        {
-            last_rpm = current_rpm;
-
-            /* 更新车速显示 (将转速按比例映射到0-120范围) */
-            int speed_val = (abs(current_rpm) * 120) / 10000;
-            if (speed_val > 120)
-                speed_val = 120;
-
-            if (speed_val != last_speed)
-            {
-                last_speed = speed_val;
-                if (objects.speed_label)
-                {
-                    snprintf(buf, sizeof(buf), "%03d", speed_val);
-                    lv_label_set_text_static(objects.speed_label, buf);
-                }
-            }
         }
 
         /* === 检测当前显示的屏幕 === */
@@ -435,6 +746,15 @@ static void ui_update_task(void *arg)
         TickType_t can_now = xTaskGetTickCount();
         bool can_online = g_can_rx_seen &&
                           (can_now - g_last_can_rx_tick <= pdMS_TO_TICKS(1000));
+
+        /* 两页都接收实时数据：AUTONOMOUS更新原有数值，调试页更新CAN明细。 */
+        if ((active_scr == objects.autonomous || active_scr == s_can_dashboard) &&
+            lvgl_port_lock(portMAX_DELAY))
+        {
+            autonomous_can_dashboard_update(&can_data, can_online);
+            lvgl_port_unlock();
+        }
+
         if (can_online != last_can_online && objects.inspect_can_status)
         {
             if (lvgl_port_lock(portMAX_DELAY))
@@ -450,7 +770,7 @@ static void ui_update_task(void *arg)
             last_can_online = can_online;
         }
 
-        /* === 独立BOOT / GPIO35：任何页面返回主界面 === */
+        /* === BOOT / GPIO35：在AUTONOMOUS原界面与CAN调试页之间切换 === */
         {
             uint8_t val = gpio_get_level(BOOT_GPIO_PIN);
             static uint8_t debounce_cnt = 0;
@@ -469,9 +789,14 @@ static void ui_update_task(void *arg)
             if (boot_last == 1 && curr == 0)
             {
                 ESP_LOGI(TAG, "BOOT pressed (GPIO35)");
-                ami_selection = 0;
-                ami_show_selection(ami_selection);
-                loadScreen(SCREEN_ID_AMI);
+                if (active_scr == objects.autonomous && s_can_dashboard)
+                {
+                    lv_scr_load_anim(s_can_dashboard, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+                }
+                else
+                {
+                    loadScreen(SCREEN_ID_AUTONOMOUS);
+                }
             }
             boot_last = curr;
         }
@@ -730,6 +1055,9 @@ void app_main(void)
 
     /* 初始化LVGL显示 */
     lvgl_demo(); /* 运行LVGL例程 */
+
+    /* 创建独立CAN接收调试页；启动页保持AUTONOMOUS原界面。 */
+    autonomous_can_dashboard_init();
 
     /*
      * GPIO3还用于LCD RGB识别(M2)，因此旋钮必须放在lvgl_demo()之后初始化；

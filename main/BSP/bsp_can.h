@@ -6,6 +6,7 @@
 /* CAN扩展帧ID定义 */
 #define VCU_TO_MCU_CMD_ID     0x08C1EF21  /* VCU→MCU 电机控制命令 */
 #define MCU_TO_VCU_STATUS1_ID 0x0CFFC6EF  /* MCU→VCU 电机状态信息1 */
+#define MCU_TO_VCU_STATUS2_ID 0x0CFFC7EF  /* MCU→VCU 电机状态信息2 */
 
 /* CAN接收回调函数类型 */
 typedef void (*can_data_callback_t)(uint32_t can_id, uint8_t *data, uint8_t len);
