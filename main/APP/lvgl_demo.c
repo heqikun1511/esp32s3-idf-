@@ -84,13 +84,15 @@ static void lvgl_timer_task(void *arg)
  * @param       无
  * @retval      无
  */
-void lvgl_demo(void)
+static void lvgl_init_common(bool enable_touch, bool enable_app_ui)
 {
     g_lvgl_mutex = xSemaphoreCreateMutex();
     assert(g_lvgl_mutex);
     lv_init();              /* 初始化LVGL图形to_rgb565.c:256库 */
     lv_port_disp_init();    /* lvgl显示接口初始化,放在lv_init()的后面 */
-    lv_port_indev_init();   /* lvgl输入接口初始化,放在lv_init()的后面 */
+    if (enable_touch) {
+        lv_port_indev_init();   /* lvgl输入接口初始化,放在lv_init()的后面 */
+    }
 
     /* 为LVGL提供时基单元 */
     const esp_timer_create_args_t lvgl_tick_timer_args = {
@@ -101,8 +103,10 @@ void lvgl_demo(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));     /* 创建定时器 */
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 1 * 1000));           /* 启动定时器 */
 
-    /* EEZ Studio UI */
-    ui_init();
+    if (enable_app_ui) {
+        /* EEZ Studio UI */
+        ui_init();
+    }
 
     /* 创建独立任务运行 lv_timer_handler 循环, 避免阻塞 app_main
      * 注意: LVGL软件渲染需要较大栈空间, 8192为安全值
@@ -116,6 +120,18 @@ void lvgl_demo(void)
         NULL,
         tskNO_AFFINITY
     );
+}
+
+void lvgl_demo(void)
+{
+    lvgl_init_common(true, true);
+}
+
+void lvgl_display_only_init(void)
+{
+    /* CAN screen test: retain the complete MIPI/LVGL display path but avoid
+     * touch, I2C and the application UI entirely. */
+    lvgl_init_common(false, false);
 }
 
 /**

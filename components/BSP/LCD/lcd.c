@@ -32,9 +32,9 @@ DRAM_ATTR _lcd_dev lcddev;                  /* 管理LCD重要参数 */
 uint32_t g_back_color  = 0xFFFF;            /* 背景色 */
 
 /*
- * Put the panel into a known safe state before the DSI host is initialized.
- * Keeping BL low prevents a lit-but-uninitialized panel; RST is later pulsed
- * by mipi_lcd_panelreset() after the DSI PHY has been powered up.
+ * Keep the active-high backlight enable asserted while the DSI host is
+ * initialized. RST is still later pulsed by mipi_lcd_panelreset() after the
+ * DSI PHY has been powered up.
  */
 static void lcd_control_gpio_init(void)
 {
@@ -47,7 +47,7 @@ static void lcd_control_gpio_init(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&config));
-    LCD_BACKLIGHT_OFF();
+    LCD_BACKLIGHT_ON();
     LCD_RESET_ASSERT();
     ESP_LOGI("lcd", "LCD control GPIO ready: BL=GPIO%d (active high), RST=GPIO%d (active low)",
              LCD_BL_PIN, LCD_RST_PIN);

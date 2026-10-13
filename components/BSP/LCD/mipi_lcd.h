@@ -45,7 +45,10 @@
 #define MIPI_DSI_LANE_BITRATE_MBPS      700     /* ATK-MD0550M 两-lane RGB565 原始驱动参数 */
 
 /* One-shot D0 LP/BTA diagnostic. Set to 0 after the hardware test. */
-#define MIPI_DSI_ID_READ_DIAGNOSTIC     1
+/* HX8399 does not answer the generic DCS ID reads.  The panel profile is
+ * selected explicitly in mipi_lcd_init(), so leave this diagnostic disabled
+ * for normal full-screen operation. */
+#define MIPI_DSI_ID_READ_DIAGNOSTIC     0
 
 /* 设置VDD_MIPI_DPHY输出电压 */
 #define MIPI_DSI_PHY_PWR_LDO_CHAN       3       /* LDO_VO3 连接 VDD_MIPI_DPHY */

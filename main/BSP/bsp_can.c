@@ -111,6 +111,25 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback)
     return 0;
 }
 
+int bsp_can_get_status(bsp_can_status_t *status)
+{
+    if (!status) {
+        return -1;
+    }
+
+    twai_status_info_t twai_status = {0};
+    if (twai_get_status_info(&twai_status) != ESP_OK) {
+        return -1;
+    }
+
+    status->state = (uint32_t)twai_status.state;
+    status->tx_error_counter = twai_status.tx_error_counter;
+    status->rx_error_counter = twai_status.rx_error_counter;
+    status->tx_failed_count = twai_status.tx_failed_count;
+    status->bus_error_count = twai_status.bus_error_count;
+    return 0;
+}
+
 /**
  * @brief       发送CAN扩展帧
  * @param       can_id : 29位扩展帧ID

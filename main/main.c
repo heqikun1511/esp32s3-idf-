@@ -20,15 +20,27 @@
 #include "ui/vars.h"
 #include "ui/fonts.h"
 #include "lcd.h"
-#include "tinyusb.h"
-#include "tinyusb_cdc_acm.h"
-#include "tinyusb_console.h"
-/* TINYUSB_DEFAULT_CONFIG() 宏定义在该头文件中, tinyusb.h 并不包含它 */
-#include "tinyusb_default_config.h"
 #include "ws2815_test.h"
 #include "rotary_input.h"
 
 static const char *TAG = "MAIN";
+
+/* Keep the panel's active-high backlight enable asserted from the first
+ * application instruction.  LCD/DSI initialisation later configures RESET
+ * and the video link normally. */
+static void lcd_backlight_boot_enable(void)
+{
+    const gpio_config_t config = {
+        .pin_bit_mask = 1ULL << LCD_BL_PIN,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_ERROR_CHECK(gpio_config(&config));
+    LCD_BACKLIGHT_ON();
+}
 
 /*
  * 仅用于硬件定位：设为 1 时，app_main() 在 USB CDC 就绪后直接初始化 MIPI
@@ -43,17 +55,22 @@ static const char *TAG = "MAIN";
  */
 #define LCD_MINIMAL_TEST_ENABLE_MIPI 0
 
+/* Stand-alone diagnostic: only the complete display driver and CAN-B run.
+ * The old dashboard, touch, rotary, LEDs, buttons and I2C expander are not
+ * initialised. */
+#define SCREEN_CAN_TEST_ONLY 1
+
 /* GPIO13 WS2812 board wiring test: hold the data pin at a steady 3.3 V. */
 #define GPIO13_HIGH_LEVEL_TEST 0
 
-/* GPIO13 WS2812 test mode: all 16 LEDs remain at full-bright yellow. */
+/* GPIO13 WS2812 test mode: all 8 LEDs remain at full-bright yellow. */
 #define WS2815_FULL_YELLOW_TEST 0
 
-/* LCD识别和初始化完成后启用KEY2/KEY3/KEY4旋钮(GPIO3/4/5)。 */
-#define ROTARY_INPUT_ENABLE 1
+/* Keep the optional rotary input disabled while diagnosing the CAN bus. */
+#define ROTARY_INPUT_ENABLE 0
 
 /* 板内转速演示：1=自动循环0~5000 RPM，0=只使用真实CAN报文。 */
-#define RPM_INTERNAL_DEMO_ENABLE 1
+#define RPM_INTERNAL_DEMO_ENABLE 0
 #define RPM_DEMO_STEP             25
 #define RPM_DEMO_STEP_MS          20
 #define RPM_DEMO_ENDPOINT_HOLD_MS 1000
@@ -99,55 +116,179 @@ static SemaphoreHandle_t g_rpm_mutex = NULL;
 
 /* EXIO8/9/10通过XL9555 IO扩展器连接，均按低电平有效处理。 */
 
-/* CAN TX引脚 (根据实际硬件修改) */
-#define CAN_TX_PIN GPIO_NUM_27
-/* CAN RX引脚 (根据实际硬件修改) */
-#define CAN_RX_PIN GPIO_NUM_26
+/* CAN-B: the board routes GPIO20 -> CANB_TX and GPIO19 -> CANB_RX through
+ * the ISO1042 transceiver. */
+#define CAN_TX_PIN GPIO_NUM_20
+#define CAN_RX_PIN GPIO_NUM_19
 
-/*tinyusb初始化函数*/
-/**
- * @brief       USB CDC 虚拟串口控制台初始化
- * @note        整个程序只能调用一次; 调用成功后 ESP_LOGI/printf 的输出会同时
- *              从 USB 虚拟串口输出, 形成“USB 调试串口”。
- *              该函数内部会把日志任务绑到默认的 TinyUSB 任务上, 因此不要在
- *              高优先级任务中反复调用。
- * @param       无
- * @retval      无
- */
-static void usb_cdc_console_init(void)
+#if SCREEN_CAN_TEST_ONLY
+#define CAN_SCREEN_TEST_TX_ID 0x18FF50E5U
+
+typedef struct
 {
-    /*
-     * 第1步: 安装 TinyUSB 设备驱动, 并启动 TinyUSB 后台任务。
-     * TINYUSB_DEFAULT_CONFIG() 会按目标芯片自动填入默认参数:
-     *   - ESP32-P4 使用高速端口 TINYUSB_PORT_HIGH_SPEED_0
-     *   - PHY 使用默认值, 且不监控 VBUS(vbus_monitor_io = -1)
-     *   - 设备/配置描述符指针为空, 由协议栈回退到内置的默认描述符
-     * 若后续要自定义 VID/PID 或字符串描述符, 需要在此结构体的
-     * descriptor 成员中填入自己的描述符表。
-     */
-    const tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
-    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    uint32_t rx_count;
+    uint32_t last_id;
+    uint8_t last_len;
+    uint8_t last_data[8];
+    TickType_t last_rx_tick;
+    uint32_t tx_ok_count;
+    uint32_t tx_fail_count;
+} can_screen_test_data_t;
 
-    /*
-     * 第2步: 初始化一路 CDC ACM 接口(即虚拟串口)。
-     * cdc_port 指定 CDC 接口号, TINYUSB_CDC_ACM_0 表示第 0 路;
-     * 这里不注册任何回调, 收发数据使用 tinyusb_cdcacm_read/write,
-     * 若只当作控制台使用则无需手动读写。
-     * 其余回调成员未指定, 由 C 语言自动初始化为 NULL。
-     */
-    tinyusb_config_cdcacm_t cdc_cfg = {
-        .cdc_port = TINYUSB_CDC_ACM_0,
-    };
-    ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cdc_cfg));
+static can_screen_test_data_t s_can_screen_test_data;
+static portMUX_TYPE s_can_screen_test_lock = portMUX_INITIALIZER_UNLOCKED;
+static lv_obj_t *s_can_screen_test_status;
+static lv_obj_t *s_can_screen_test_bus;
+static lv_obj_t *s_can_screen_test_rx;
+static lv_obj_t *s_can_screen_test_last;
+static lv_obj_t *s_can_screen_test_tx;
 
-    /*
-     * 第3步: 把标准输入输出(stdio)重定向到该 CDC 接口, 使其成为控制台。
-     * 注意 esp_tinyusb v2.x 的形参是 int 类型的“接口号”,
-     * 而不是 tinyusb_config_cdcacm_t 结构体指针;
-     * 接口未初始化时返回 ESP_ERR_INVALID_STATE(已被 ESP_ERROR_CHECK 拦截)。
-     */
-    ESP_ERROR_CHECK(tinyusb_console_init(cdc_cfg.cdc_port));
+static void can_screen_test_callback(uint32_t can_id, uint8_t *data, uint8_t len)
+{
+    taskENTER_CRITICAL(&s_can_screen_test_lock);
+    s_can_screen_test_data.rx_count++;
+    s_can_screen_test_data.last_id = can_id;
+    s_can_screen_test_data.last_len = len > 8 ? 8 : len;
+    if (data && len) {
+        memcpy(s_can_screen_test_data.last_data, data,
+               s_can_screen_test_data.last_len);
+    }
+    s_can_screen_test_data.last_rx_tick = xTaskGetTickCount();
+    taskEXIT_CRITICAL(&s_can_screen_test_lock);
 }
+
+static const char *can_screen_test_state_name(uint32_t state)
+{
+    switch (state) {
+    case 0: return "STOPPED";
+    case 1: return "RUNNING";
+    case 2: return "BUS OFF";
+    case 3: return "RECOVERING";
+    default: return "UNKNOWN";
+    }
+}
+
+static lv_obj_t *can_screen_test_label(lv_obj_t *parent, int y, const lv_font_t *font)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_pos(label, 90, y);
+    lv_obj_set_width(label, 1740);
+    lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xE8EDF2), LV_PART_MAIN);
+    return label;
+}
+
+static void can_screen_test_ui_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        can_screen_test_data_t data;
+        bsp_can_status_t status = {0};
+        taskENTER_CRITICAL(&s_can_screen_test_lock);
+        data = s_can_screen_test_data;
+        taskEXIT_CRITICAL(&s_can_screen_test_lock);
+        int status_ok = bsp_can_get_status(&status);
+        TickType_t now = xTaskGetTickCount();
+        bool rx_recent = data.rx_count &&
+                         (now - data.last_rx_tick <= pdMS_TO_TICKS(2000));
+        char text[192];
+
+        if (lvgl_port_lock(portMAX_DELAY)) {
+            lv_label_set_text(s_can_screen_test_status,
+                              rx_recent ? "CAN-B RECEIVING" : "CAN-B WAITING FOR PC FRAME");
+            lv_obj_set_style_text_color(s_can_screen_test_status,
+                                        lv_color_hex(rx_recent ? 0x39FF65 : 0xFFD400),
+                                        LV_PART_MAIN);
+
+            if (status_ok == 0) {
+                snprintf(text, sizeof(text),
+                         "Controller: %s    TEC: %lu    REC: %lu    Bus errors: %lu    TX failures: %lu",
+                         can_screen_test_state_name(status.state),
+                         (unsigned long)status.tx_error_counter,
+                         (unsigned long)status.rx_error_counter,
+                         (unsigned long)status.bus_error_count,
+                         (unsigned long)status.tx_failed_count);
+            } else {
+                snprintf(text, sizeof(text), "Controller: NOT INITIALISED");
+            }
+            lv_label_set_text(s_can_screen_test_bus, text);
+
+            snprintf(text, sizeof(text), "RX frames: %lu", (unsigned long)data.rx_count);
+            lv_label_set_text(s_can_screen_test_rx, text);
+
+            snprintf(text, sizeof(text),
+                     "Last RX: ID 0x%08lX   DLC %u   DATA %02X %02X %02X %02X %02X %02X %02X %02X",
+                     (unsigned long)data.last_id, data.last_len,
+                     data.last_data[0], data.last_data[1], data.last_data[2], data.last_data[3],
+                     data.last_data[4], data.last_data[5], data.last_data[6], data.last_data[7]);
+            lv_label_set_text(s_can_screen_test_last, text);
+
+            snprintf(text, sizeof(text),
+                     "ESP test TX: ID 0x%08X every 1 s    success: %lu    failed: %lu",
+                     CAN_SCREEN_TEST_TX_ID, (unsigned long)data.tx_ok_count,
+                     (unsigned long)data.tx_fail_count);
+            lv_label_set_text(s_can_screen_test_tx, text);
+            lvgl_port_unlock();
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+static void can_screen_test_tx_task(void *arg)
+{
+    (void)arg;
+    uint32_t sequence = 0;
+    for (;;) {
+        uint8_t frame[8] = { 0xCA, 0x4E, 0xB0, 0x01,
+                             (uint8_t)(sequence >> 24), (uint8_t)(sequence >> 16),
+                             (uint8_t)(sequence >> 8), (uint8_t)sequence };
+        int ret = bsp_can_send(CAN_SCREEN_TEST_TX_ID, frame, sizeof(frame));
+        taskENTER_CRITICAL(&s_can_screen_test_lock);
+        if (ret == 0) {
+            s_can_screen_test_data.tx_ok_count++;
+        } else {
+            s_can_screen_test_data.tx_fail_count++;
+        }
+        taskEXIT_CRITICAL(&s_can_screen_test_lock);
+        sequence++;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+static void can_screen_test_start(void)
+{
+    /* Complete MIPI/LVGL display path; this intentionally does not initialise
+     * the touch controller or the application-generated screens. */
+    lvgl_display_only_init();
+
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        lv_obj_t *screen = lv_scr_act();
+        lv_obj_set_style_bg_color(screen, lv_color_hex(0x071018), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+
+        lv_obj_t *title = can_screen_test_label(screen, 80, &lv_font_montserrat_48);
+        lv_label_set_text(title, "CAN-B / DISPLAY DIAGNOSTIC");
+        s_can_screen_test_status = can_screen_test_label(screen, 200, &lv_font_montserrat_48);
+        s_can_screen_test_bus = can_screen_test_label(screen, 330, &ui_font_orbitron_bold_25);
+        s_can_screen_test_rx = can_screen_test_label(screen, 440, &lv_font_montserrat_48);
+        s_can_screen_test_last = can_screen_test_label(screen, 560, &ui_font_orbitron_bold_25);
+        s_can_screen_test_tx = can_screen_test_label(screen, 690, &ui_font_orbitron_bold_25);
+
+        lv_obj_t *pins = can_screen_test_label(screen, 820, &ui_font_orbitron_bold_25);
+        lv_label_set_text(pins, "CAN-B pins: GPIO20 = TX, GPIO19 = RX   |   Bit rate: 250 kbit/s   |   Extended CAN frames");
+        lvgl_port_unlock();
+    }
+
+    int can_ret = bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_screen_test_callback);
+    ESP_LOGI(TAG, "CAN-B diagnostic init: TX=%d RX=%d result=%d", CAN_TX_PIN, CAN_RX_PIN, can_ret);
+    if (can_ret == 0) {
+        xTaskCreatePinnedToCore(can_screen_test_tx_task, "can_test_tx", 3072,
+                                NULL, 4, NULL, tskNO_AFFINITY);
+    }
+    xTaskCreatePinnedToCore(can_screen_test_ui_task, "can_test_ui", 4096,
+                            NULL, 3, NULL, tskNO_AFFINITY);
+}
+#endif
 
 #if LCD_MINIMAL_TEST
 static void lcd_minimal_test(void)
@@ -381,7 +522,61 @@ static void rpm_internal_demo_task(void *arg)
 #define INSPECT_STAGE_COUNT 5
 
 static lv_obj_t *s_can_dashboard;
-static lv_obj_t *s_can_dashboard_text;
+
+typedef struct
+{
+    lv_obj_t *online;
+    lv_obj_t *command_rpm;
+    lv_obj_t *actual_rpm;
+    lv_obj_t *command_torque;
+    lv_obj_t *actual_torque;
+    lv_obj_t *controller_temp;
+    lv_obj_t *motor_temp;
+    lv_obj_t *dc_bus_voltage;
+    lv_obj_t *dc_bus_current;
+    lv_obj_t *ac_rms_current;
+    lv_obj_t *dc_power;
+    lv_obj_t *command_state;
+    lv_obj_t *mcu_state;
+    lv_obj_t *readiness;
+    lv_obj_t *faults;
+    lv_obj_t *alarms;
+} can_dashboard_widgets_t;
+
+static can_dashboard_widgets_t s_can_widgets;
+
+static lv_obj_t *can_dashboard_card(lv_obj_t *parent, int x, int y, int w, int h,
+                                    const char *title, bool large_value)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_size(card, w, h);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x68717d), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 12, LV_PART_MAIN);
+
+    lv_obj_t *caption = lv_label_create(card);
+    lv_obj_set_pos(caption, 0, 0);
+    lv_obj_set_style_text_color(caption, lv_color_hex(0x9aa7b4), LV_PART_MAIN);
+    lv_obj_set_style_text_font(caption, &ui_font_orbitron_bold_20, LV_PART_MAIN);
+    lv_label_set_text(caption, title);
+
+    lv_obj_t *value = lv_label_create(card);
+    lv_obj_set_pos(value, 0, large_value ? 43 : 38);
+    lv_obj_set_size(value, w - 28, h - 55);
+    lv_obj_set_style_text_color(value, lv_color_hex(0xffffff), LV_PART_MAIN);
+    lv_obj_set_style_text_font(value, large_value ? &ui_font_orbitron_bold_50
+                                                  : &ui_font_orbitron_bold_20,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_long_mode(value, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(value, "--");
+    return value;
+}
 
 static void autonomous_can_dashboard_init(void)
 {
@@ -397,23 +592,55 @@ static void autonomous_can_dashboard_init(void)
         lv_obj_set_style_bg_opa(s_can_dashboard, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_pos(s_can_dashboard, 0, 0);
 
-        lv_obj_t *card = lv_obj_create(s_can_dashboard);
-        lv_obj_set_pos(card, 470, 75);
-        lv_obj_set_size(card, 980, 560);
-        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_color(card, lv_color_hex(0x39ff65), LV_PART_MAIN);
-        lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+        lv_obj_t *title = lv_label_create(s_can_dashboard);
+        lv_obj_set_pos(title, 55, 24);
+        lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), LV_PART_MAIN);
+        lv_obj_set_style_text_font(title, &ui_font_orbitron_bold_30, LV_PART_MAIN);
+        lv_label_set_text(title, "MOTOR CAN DIAGNOSTICS");
 
-        s_can_dashboard_text = lv_label_create(card);
-        lv_obj_set_pos(s_can_dashboard_text, 0, 0);
-        lv_obj_set_size(s_can_dashboard_text, 940, 520);
-        lv_obj_set_style_text_color(s_can_dashboard_text, lv_color_hex(0xe8edf2), LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_can_dashboard_text, &ui_font_orbitron_bold_20, LV_PART_MAIN);
-        lv_label_set_text(s_can_dashboard_text, "MOTOR CAN\nWaiting for CAN data...");
+        s_can_widgets.online = lv_label_create(s_can_dashboard);
+        lv_obj_set_pos(s_can_widgets.online, 1600, 25);
+        lv_obj_set_size(s_can_widgets.online, 260, 48);
+        lv_obj_set_style_bg_opa(s_can_widgets.online, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_can_widgets.online, lv_color_hex(0x68717d), LV_PART_MAIN);
+        lv_obj_set_style_radius(s_can_widgets.online, 8, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_can_widgets.online, lv_color_hex(0x050607), LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_can_widgets.online, &ui_font_orbitron_bold_20, LV_PART_MAIN);
+        lv_obj_set_style_text_align(s_can_widgets.online, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_label_set_text(s_can_widgets.online, "CAN OFFLINE");
+
+        s_can_widgets.command_rpm = can_dashboard_card(s_can_dashboard, 50, 95, 430, 165,
+                                                        "TARGET RPM", true);
+        s_can_widgets.actual_rpm = can_dashboard_card(s_can_dashboard, 515, 95, 430, 165,
+                                                       "ACTUAL RPM", true);
+        s_can_widgets.command_torque = can_dashboard_card(s_can_dashboard, 980, 95, 430, 165,
+                                                           "TARGET TORQUE (permille)", true);
+        s_can_widgets.actual_torque = can_dashboard_card(s_can_dashboard, 1445, 95, 430, 165,
+                                                          "ACTUAL TORQUE (permille)", true);
+
+        s_can_widgets.controller_temp = can_dashboard_card(s_can_dashboard, 50, 290, 280, 165,
+                                                            "CTRL TEMP (C)", true);
+        s_can_widgets.motor_temp = can_dashboard_card(s_can_dashboard, 360, 290, 280, 165,
+                                                       "MOTOR TEMP (C)", true);
+        s_can_widgets.dc_bus_voltage = can_dashboard_card(s_can_dashboard, 670, 290, 280, 165,
+                                                          "DC BUS (V)", true);
+        s_can_widgets.dc_bus_current = can_dashboard_card(s_can_dashboard, 980, 290, 280, 165,
+                                                          "DC CURRENT (A)", true);
+        s_can_widgets.ac_rms_current = can_dashboard_card(s_can_dashboard, 1290, 290, 280, 165,
+                                                          "AC RMS (A)", true);
+        s_can_widgets.dc_power = can_dashboard_card(s_can_dashboard, 1600, 290, 275, 165,
+                                                    "DC POWER (kW)", true);
+
+        s_can_widgets.command_state = can_dashboard_card(s_can_dashboard, 50, 485, 575, 225,
+                                                          "VCU COMMAND", false);
+        s_can_widgets.mcu_state = can_dashboard_card(s_can_dashboard, 672, 485, 575, 225,
+                                                      "MCU STATE", false);
+        s_can_widgets.readiness = can_dashboard_card(s_can_dashboard, 1295, 485, 580, 225,
+                                                      "READINESS", false);
+        s_can_widgets.faults = can_dashboard_card(s_can_dashboard, 50, 740, 897, 275,
+                                                   "CONTROLLER FAULTS", false);
+        s_can_widgets.alarms = can_dashboard_card(s_can_dashboard, 977, 740, 898, 275,
+                                                   "ALARMS", false);
     }
 
     lvgl_port_unlock();
@@ -455,6 +682,14 @@ static void label_set_if_changed(lv_obj_t *label, const char *text)
 {
     if (label && strcmp(lv_label_get_text(label), text) != 0)
         lv_label_set_text(label, text);
+}
+
+static void dashboard_set_text(lv_obj_t *label, const char *text, uint32_t color)
+{
+    if (!label)
+        return;
+    label_set_if_changed(label, text);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
 }
 
 /* UI数字显示使用一阶插值；CAN解析快照本身不被滤波，控制/故障逻辑不受影响。 */
@@ -551,7 +786,6 @@ static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool o
     label_set_if_changed(objects.lv_volt, "--");
     label_set_if_changed(objects.lv_a, "--");
 
-    char report[768];
     char mode[96], actual_mode[96];
     char cmd_rpm[20], cmd_torque[20], cmd_bus[20];
     char actual_rpm[20], actual_torque[20];
@@ -589,44 +823,92 @@ static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool o
         strlcpy(ac_current, "--", sizeof(ac_current));
     }
 
-    snprintf(report, sizeof(report),
-        "MOTOR CAN  %s\n"
-        "VCU RPM %s  TQ %s/1000\n"
-        "VCU MODE %s\n"
-        "GEAR %s  CONTACTOR %s\n"
-        "CMD BUS %s V\n"
-        "MCU RPM %s  TQ %s/1000\n"
-        "MCU MODE %s\n"
-        "READY %s PRECHG %s SELFTEST %s\n"
-        "FLT R:%s OC:%s OV:%s C:%s U:%s P:%s\n"
-        "TEMP ALARM C:%s M:%s  %s\n"
-        "CTRL TEMP %s C  MOTOR TEMP %s C\n"
-        "DC BUS %s V  DC I %s A\n"
-        "AC RMS I %s A",
-        online ? "ONLINE" : "NO FRAMES",
-        cmd_rpm, cmd_torque,
-        data->command_valid ? motor_mode_name(data->command_mode, mode, sizeof(mode)) : "--",
-        data->command_valid ? motor_gear_name(data->command_gear) : "--",
-        data->command_valid ? (data->command_main_contactor ? "CLOSED" : "OPEN") : "--",
-        cmd_bus,
-        actual_rpm, actual_torque,
-        data->status1_valid ? motor_mode_name(data->actual_mode, actual_mode, sizeof(actual_mode)) : "--",
-        data->status1_valid ? ((data->status_flags & 0x01) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x02) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->alarm_flags & 0x80) ? "DONE" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x04) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x08) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x10) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x20) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x40) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->status_flags & 0x80) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->alarm_flags & 0x01) ? "YES" : "NO") : "--",
-        data->status1_valid ? ((data->alarm_flags & 0x02) ? "YES" : "NO") : "--",
-        data->status1_valid ? alarm_name[data->combined_alarm & 0x03] : "--",
-        controller_temp, motor_temp, dc_bus, dc_current, ac_current);
+    if (s_can_widgets.online)
+    {
+        label_set_if_changed(s_can_widgets.online, online ? "CAN ONLINE" : "CAN OFFLINE");
+        lv_obj_set_style_bg_color(s_can_widgets.online,
+                                  lv_color_hex(online ? 0x39ff65 : 0xff2c2c), LV_PART_MAIN);
+    }
 
-    if (s_can_dashboard_text)
-        label_set_if_changed(s_can_dashboard_text, report);
+    dashboard_set_text(s_can_widgets.command_rpm, cmd_rpm, 0xffffff);
+    dashboard_set_text(s_can_widgets.actual_rpm, actual_rpm, 0x39ff65);
+    dashboard_set_text(s_can_widgets.command_torque, cmd_torque, 0xffffff);
+    dashboard_set_text(s_can_widgets.actual_torque, actual_torque, 0x39ff65);
+    dashboard_set_text(s_can_widgets.controller_temp, controller_temp, 0xffffff);
+    dashboard_set_text(s_can_widgets.motor_temp, motor_temp, 0xffffff);
+    dashboard_set_text(s_can_widgets.dc_bus_voltage, dc_bus, 0xffffff);
+    dashboard_set_text(s_can_widgets.dc_bus_current, dc_current, 0xffffff);
+    dashboard_set_text(s_can_widgets.ac_rms_current, ac_current, 0xffffff);
+
+    char power[20];
+    if (data->status2_valid)
+        snprintf(power, sizeof(power), "%.1f",
+                 s_motor_display.dc_bus_voltage * s_motor_display.dc_bus_current / 1000.0f);
+    else
+        strlcpy(power, "--", sizeof(power));
+    dashboard_set_text(s_can_widgets.dc_power, power, 0xf7ff00);
+
+    char detail[192];
+    if (data->command_valid)
+    {
+        snprintf(detail, sizeof(detail), "MODE  %s\nGEAR  %s\nCONTACTOR  %s\nCMD BUS  %s V",
+                 motor_mode_name(data->command_mode, mode, sizeof(mode)),
+                 motor_gear_name(data->command_gear),
+                 data->command_main_contactor ? "CLOSED" : "OPEN", cmd_bus);
+        dashboard_set_text(s_can_widgets.command_state, detail, 0xffffff);
+    }
+    else
+        dashboard_set_text(s_can_widgets.command_state, "NO COMMAND FRAME", 0x68717d);
+
+    if (data->status1_valid)
+    {
+        snprintf(detail, sizeof(detail), "MODE  %s\nSYSTEM  %s\nALARM LEVEL  %s",
+                 motor_mode_name(data->actual_mode, actual_mode, sizeof(actual_mode)),
+                 (data->actual_mode & 0x80) ? "FAULT" : "NORMAL",
+                 alarm_name[data->combined_alarm & 0x03]);
+        dashboard_set_text(s_can_widgets.mcu_state, detail,
+                           data->combined_alarm ? 0xffd400 : 0x39ff65);
+
+        bool ready = (data->status_flags & 0x01) != 0;
+        bool precharge = (data->status_flags & 0x02) != 0;
+        bool selftest = (data->alarm_flags & 0x80) != 0;
+        snprintf(detail, sizeof(detail), "READY  %s\nPRECHARGE  %s\nSELF TEST  %s",
+                 ready ? "YES" : "NO", precharge ? "DONE" : "NO",
+                 selftest ? "DONE" : "NO");
+        dashboard_set_text(s_can_widgets.readiness, detail,
+                           (ready && precharge && selftest) ? 0x39ff65 : 0xffd400);
+
+        bool controller_fault = (data->status_flags & 0x3c) != 0;
+        snprintf(detail, sizeof(detail),
+                 "RESOLVER  %s    OVER CURRENT  %s\n"
+                 "OVER VOLT  %s    CTRL FAULT  %s\n"
+                 "UNDER VOLT %s    POWER LIMIT %s",
+                 (data->status_flags & 0x04) ? "FAULT" : "OK",
+                 (data->status_flags & 0x08) ? "FAULT" : "OK",
+                 (data->status_flags & 0x10) ? "FAULT" : "OK",
+                 (data->status_flags & 0x20) ? "FAULT" : "OK",
+                 (data->status_flags & 0x40) ? "FAULT" : "OK",
+                 (data->status_flags & 0x80) ? "ACTIVE" : "OFF");
+        dashboard_set_text(s_can_widgets.faults, detail,
+                           controller_fault || (data->status_flags & 0xc0) ? 0xff2c2c : 0x39ff65);
+
+        bool temp_alarm = (data->alarm_flags & 0x03) != 0;
+        snprintf(detail, sizeof(detail),
+                 "CONTROLLER TEMP  %s\nMOTOR TEMP       %s\nCOMBINED         %s",
+                 (data->alarm_flags & 0x01) ? "ALARM" : "OK",
+                 (data->alarm_flags & 0x02) ? "ALARM" : "OK",
+                 alarm_name[data->combined_alarm & 0x03]);
+        uint32_t alarm_color = (data->combined_alarm >= 2 || temp_alarm) ? 0xff2c2c
+                                 : (data->combined_alarm == 1 ? 0xffd400 : 0x39ff65);
+        dashboard_set_text(s_can_widgets.alarms, detail, alarm_color);
+    }
+    else
+    {
+        dashboard_set_text(s_can_widgets.mcu_state, "NO STATUS 1 FRAME", 0x68717d);
+        dashboard_set_text(s_can_widgets.readiness, "--", 0x68717d);
+        dashboard_set_text(s_can_widgets.faults, "NO STATUS 1 FRAME", 0x68717d);
+        dashboard_set_text(s_can_widgets.alarms, "NO STATUS 1 FRAME", 0x68717d);
+    }
 
     char buf[32];
     if (rpm_valid)
@@ -1030,6 +1312,9 @@ static void ui_update_task(void *arg)
  */
 void app_main(void)
 {
+    /* Stand-alone 12 V boot must not depend on USB CDC initialisation. */
+    lcd_backlight_boot_enable();
+
 #if GPIO13_HIGH_LEVEL_TEST
     gpio13_high_level_test();
     return;
@@ -1062,14 +1347,23 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2000));
 #endif
 
-    usb_cdc_console_init();
-    ESP_LOGI(TAG, "USB CDC ready");
+    /* sdkconfig selects USB Serial/JTAG as the ESP console.  Do not install a
+     * second TinyUSB CDC console here: the board's existing /dev/ttyACM0 is
+     * then the single destination for boot and application logs. */
+    ESP_LOGI(TAG, "USB Serial/JTAG console ready (ACM0)");
     ESP_LOGW(TAG, "Reset reason: %d", esp_reset_reason());
 
 #if LCD_MINIMAL_TEST
     /* 留出 CDC 枚举时间，之后只执行 LCD 驱动和纯色刷新。 */
     vTaskDelay(pdMS_TO_TICKS(1000));
     lcd_minimal_test();
+    return;
+#endif
+
+#if SCREEN_CAN_TEST_ONLY
+    /* Deliberately return after display + CAN-B. No XL9555/I2C, rotary,
+     * touch, WS2815, BOOT key, dashboard or other application task runs. */
+    can_screen_test_start();
     return;
 #endif
 
@@ -1087,10 +1381,12 @@ void app_main(void)
     g_rpm_mutex = xSemaphoreCreateMutex();
     assert(g_rpm_mutex);
 
-    /* 16-LED tachometer uses the VCU/MCU speed field updated in the CAN callback. */
+    /* 8-LED tachometer uses the VCU/MCU speed field updated in the CAN callback. */
     ws2815_rpm_bar_start(&g_current_rpm);
 
-    /* Keep the tachometer independent of LCD/LVGL initialisation. */
+    /* GPIO20/19 are independent of the RGB-ID pins used while LCD probes its
+     * panel.  Start CAN here so reception is already active during the LVGL
+     * and display startup sequence. */
     ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);
     if (bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_data_callback) == 0)
     {

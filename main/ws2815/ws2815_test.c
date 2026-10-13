@@ -11,7 +11,7 @@
 
 /* Board wiring: GPIO13 -> WS2815B DI. */
 #define WS2815_TEST_GPIO          GPIO_NUM_13
-#define WS2815_TEST_LED_COUNT     16
+#define WS2815_TEST_LED_COUNT     8
 #define WS2815_RMT_RESOLUTION_HZ  (10 * 1000 * 1000)
 
 /* 0--5000 rpm display calibration. The final pre-limit red zone is 500 rpm. */
@@ -84,13 +84,10 @@ static void ws2815_rpm_bar_frame(uint8_t *pixels, int rpm, TickType_t now)
 
     for (int i = 0; i < lit_count; ++i) {
         int led_rpm = RPM_START + (i * span) / WS2815_TEST_LED_COUNT;
-        if (i >= WS2815_TEST_LED_COUNT - 2) {
-            /* The final two LEDs are the red end of the orange band. */
-            ws2815_set_rgb(pixels, i, 160, 0, 0);
-        } else if (led_rpm >= RPM_ORANGE) {
+        if (led_rpm >= RPM_ORANGE) {
             ws2815_set_rgb(pixels, i, 180, 55, 0);
         } else if (led_rpm >= RPM_YELLOW) {
-            /* Full yellow was verified on all 16 physical LEDs. */
+            /* Yellow middle zone of the 8-LED speed bar. */
             ws2815_set_rgb(pixels, i, 255, 255, 0);
         } else {
             ws2815_set_rgb(pixels, i, 0, 130, 0);
