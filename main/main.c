@@ -58,7 +58,7 @@ static void lcd_backlight_boot_enable(void)
 /* Stand-alone diagnostic: only the complete display driver and CAN-B run.
  * The old dashboard, touch, rotary, LEDs, buttons and I2C expander are not
  * initialised. */
-#define SCREEN_CAN_TEST_ONLY 1
+#define SCREEN_CAN_TEST_ONLY 0
 
 /* GPIO13 WS2812 board wiring test: hold the data pin at a steady 3.3 V. */
 #define GPIO13_HIGH_LEVEL_TEST 0
@@ -70,7 +70,7 @@ static void lcd_backlight_boot_enable(void)
 #define ROTARY_INPUT_ENABLE 0
 
 /* 板内转速演示：1=自动循环0~5000 RPM，0=只使用真实CAN报文。 */
-#define RPM_INTERNAL_DEMO_ENABLE 0
+#define RPM_INTERNAL_DEMO_ENABLE 1
 #define RPM_DEMO_STEP             25
 #define RPM_DEMO_STEP_MS          20
 #define RPM_DEMO_ENDPOINT_HOLD_MS 1000

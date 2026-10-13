@@ -29,8 +29,6 @@ void lvgl_demo(void);
 /* Start only the display/LVGL engine. No touch controller or application UI. */
 void lvgl_display_only_init(void);
 lv_disp_t *lv_port_disp_init(void);
-lv_indev_t *lv_port_indev_init(void);
-void touchpad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data);
 void increase_lvgl_tick(void *arg);
 void lvgl_disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p);
 bool lvgl_port_lock(TickType_t Timeout);

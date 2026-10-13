@@ -20,7 +20,6 @@
 
 #include "lvgl_demo.h"
 #include "lcd.h"
-#include "touch.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -55,8 +54,6 @@ static uint16_t *g_rot_buf = NULL;
 
 /* Forward declarations */
 void increase_lvgl_tick(void *arg);
-static bool touchpad_is_pressed(void);
-static void touchpad_get_xy(lv_coord_t *x, lv_coord_t *y);
 
 /**
  * @brief       LVGL定时器处理任务(独立任务,避免阻塞app_main)
@@ -84,16 +81,12 @@ static void lvgl_timer_task(void *arg)
  * @param       无
  * @retval      无
  */
-static void lvgl_init_common(bool enable_touch, bool enable_app_ui)
+static void lvgl_init_common(bool enable_app_ui)
 {
     g_lvgl_mutex = xSemaphoreCreateMutex();
     assert(g_lvgl_mutex);
     lv_init();              /* 初始化LVGL图形to_rgb565.c:256库 */
     lv_port_disp_init();    /* lvgl显示接口初始化,放在lv_init()的后面 */
-    if (enable_touch) {
-        lv_port_indev_init();   /* lvgl输入接口初始化,放在lv_init()的后面 */
-    }
-
     /* 为LVGL提供时基单元 */
     const esp_timer_create_args_t lvgl_tick_timer_args = {
         .callback = &increase_lvgl_tick,    /* 设置定时器回调 */
@@ -124,14 +117,14 @@ static void lvgl_init_common(bool enable_touch, bool enable_app_ui)
 
 void lvgl_demo(void)
 {
-    lvgl_init_common(true, true);
+    lvgl_init_common(true);
 }
 
 void lvgl_display_only_init(void)
 {
     /* CAN screen test: retain the complete MIPI/LVGL display path but avoid
      * touch, I2C and the application UI entirely. */
-    lvgl_init_common(false, false);
+    lvgl_init_common(false);
 }
 
 /**
@@ -201,25 +194,6 @@ lv_disp_t *lv_port_disp_init(void)
 }
 
 /**
- * @brief       初始化并注册输入设备 (LVGL v8)
- * @param       无
- * @retval      lvgl输入设备指针
- */
-lv_indev_t *lv_port_indev_init(void)
-{
-    static lv_indev_drv_t indev_drv;
-
-    /* 初始化触摸屏 */
-    tp_dev.init();
-
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = touchpad_read;
-
-    return lv_indev_drv_register(&indev_drv);
-}
-
-/**
 * @brief        将内部缓冲区的内容刷新到显示屏上的特定区域 (LVGL v8)
 * @param        disp_drv : 显示设备驱动
 * @param        area : 要刷新的区域
@@ -285,72 +259,4 @@ void increase_lvgl_tick(void *arg)
 {
     /* 告诉LVGL已经过了多少毫秒 */
     lv_tick_inc(1);
-}
-
-/**
- * @brief       获取触摸屏设备的状态
- * @param       无
- * @retval      返回触摸屏设备是否被按下
- */
-static bool touchpad_is_pressed(void)
-{
-    tp_dev.scan(0);     /* 触摸按键扫描 */
-
-    if (tp_dev.sta & TP_PRES_DOWN)
-    {
-        return true;
-    }
-
-    return false;
-}
-
-
-/**
- * @brief       在触摸屏被按下的时候读取 x、y 坐标
- * @param       x   : x坐标的指针
- * @param       y   : y坐标的指针
- * @retval      无
- */
-static void touchpad_get_xy(lv_coord_t *x, lv_coord_t *y)
-{
-    if (g_need_rotate) {
-        /* 物理触摸坐标(竖屏 1080x1920) → LVGL逻辑坐标(横屏 1920x1080)
-         * flush_cb逆映射:
-         *   物理坐标(px, py) → 逻辑坐标(lx, ly)
-         *   lx = lcddev.height - 1 - py
-         *   ly = px
-         */
-        *x = lcddev.height - 1 - tp_dev.y[0];
-        *y = tp_dev.x[0];
-    } else {
-        (*x) = tp_dev.x[0];
-        (*y) = tp_dev.y[0];
-    }
-}
-
-/**
- * @brief       图形库的触摸屏读取回调函数
- * @param       indev_drv   : 触摸屏设备
- * @param       data        : 输入设备数据结构体
- * @retval      无
- */
-void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
-{
-    static lv_coord_t last_x = 0;
-    static lv_coord_t last_y = 0;
-
-    /* 保存按下的坐标和状态 */
-    if(touchpad_is_pressed())
-    {
-        touchpad_get_xy(&last_x, &last_y);  /* 在触摸屏被按下的时候读取 x、y 坐标 */
-        data->state = LV_INDEV_STATE_PR;
-    } 
-    else
-    {
-        data->state = LV_INDEV_STATE_REL;
-    }
-
-    /* 设置最后按下的坐标 */
-    data->point.x = last_x;
-    data->point.y = last_y;
 }
