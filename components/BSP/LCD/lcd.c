@@ -126,12 +126,6 @@ uint16_t lcd_panelid_read(void)
  * @param       user_ctx: 传入参数
  * @retval      无
  */
-IRAM_ATTR static bool lcd_rgb_panel_refresh_done_callback(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx)
-{
-    refresh_done_flag = 1;
-    return false;
-}
-
 /**
  * @brief       内部缓存刷新完成回调函数
  * @param       panel_io: MIPILCD IO的句柄
@@ -152,41 +146,29 @@ IRAM_ATTR static bool lcd_mipi_panel_refresh_done_callback(esp_lcd_panel_handle_
  */
 void lcd_init(void)
 {
-    lcddev.id = lcd_panelid_read();                             /* 读取RGB LCD面板ID */
     lcddev.ctrl.lcd_rst = LCD_RST_PIN;                          /* 复位管脚 */
     lcddev.ctrl.lcd_bl = LCD_BL_PIN;                            /* 背光管脚 */
 
     lcd_control_gpio_init();
 
-    if (lcddev.id != 0) /* RGBLCD屏幕已插入，且以这个屏幕为主 */
+    /* The custom board always uses MIPI-DSI.  Avoid lcd_panelid_read(): it
+     * configures GPIO14/GPIO8/GPIO3 as inputs and can mistake external inputs
+     * such as the EC11 button for a development-board RGB panel. */
+    lcddev.id = 0;
+    ESP_LOGI("lcd", "Custom-board mode: forcing MIPI panel; RGB ID probe disabled");
+    lcddev.lcd_panel_handle = mipi_lcd_init();
+    if (lcddev.lcd_panel_handle == NULL)
     {
-        lcddev.lcd_panel_handle = rgblcd_init();                /* 初始化RGB LCD */
-        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1]));
-        
-        const esp_lcd_rgb_panel_event_callbacks_t rgb_cbs = {
-            .on_frame_buf_complete = lcd_rgb_panel_refresh_done_callback,  /* 内部缓冲区刷新完成回调函数 */
-        };
+        ESP_LOGE("lcd", "MIPI LCD initialisation failed; keeping backlight on for diagnosis");
+        LCD_BACKLIGHT_ON();
+        return;
+    }
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1]));
 
-        ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(lcddev.lcd_panel_handle, &rgb_cbs, NULL));
-    }
-    else    /* MIPI屏以插入 */
-    {
-        lcddev.lcd_panel_handle = mipi_lcd_init();                          /* 初始化MIPI LCD */
-        if (lcddev.lcd_panel_handle == NULL)
-        {
-            ESP_LOGE("lcd", "MIPI LCD initialisation failed; keeping backlight on for diagnosis");
-            LCD_BACKLIGHT_ON();
-            return;
-        }
-        ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcddev.lcd_panel_handle, 2, &lcd_buffer[0], &lcd_buffer[1])); /* 获取帧缓冲区 */
-        
-        const esp_lcd_dpi_panel_event_callbacks_t mipi_cbs = {
-            .on_refresh_done = lcd_mipi_panel_refresh_done_callback,        /* 内部缓冲区刷新完成回调函数 */
-        };
-        
-        /* 注册回调函数 */
-        ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(lcddev.lcd_panel_handle, &mipi_cbs, NULL));
-    }
+    const esp_lcd_dpi_panel_event_callbacks_t mipi_cbs = {
+        .on_refresh_done = lcd_mipi_panel_refresh_done_callback,
+    };
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(lcddev.lcd_panel_handle, &mipi_cbs, NULL));
 
     /* 面板和帧缓冲区已经就绪，先打开背光。即使首帧刷新异常，也不会表现为
      * 完全无供电的黑屏，便于在没有串口监视器时判断硬件状态。 */

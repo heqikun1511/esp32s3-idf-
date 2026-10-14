@@ -14,6 +14,7 @@
 #include "lvgl.h"
 #include "lvgl_demo.h"
 #include "bsp_can.h"
+#include "vehicle_can.h"
 #include "myiic.h"
 #include "xl9555.h"
 #include "ui.h"
@@ -59,6 +60,9 @@ static void lcd_backlight_boot_enable(void)
  * The old dashboard, touch, rotary, LEDs, buttons and I2C expander are not
  * initialised. */
 #define SCREEN_CAN_TEST_ONLY 0
+/* Normal AMI operation is receive-only.  TWAI still acknowledges valid CAN
+ * frames at the CAN physical/protocol layer. */
+#define AMI_RECEIVE_ONLY 1
 
 /* GPIO13 WS2812 board wiring test: hold the data pin at a steady 3.3 V. */
 #define GPIO13_HIGH_LEVEL_TEST 0
@@ -67,10 +71,10 @@ static void lcd_backlight_boot_enable(void)
 #define WS2815_FULL_YELLOW_TEST 0
 
 /* Keep the optional rotary input disabled while diagnosing the CAN bus. */
-#define ROTARY_INPUT_ENABLE 0
+#define ROTARY_INPUT_ENABLE 1
 
 /* 板内转速演示：1=自动循环0~5000 RPM，0=只使用真实CAN报文。 */
-#define RPM_INTERNAL_DEMO_ENABLE 1
+#define RPM_INTERNAL_DEMO_ENABLE 0
 #define RPM_DEMO_STEP             25
 #define RPM_DEMO_STEP_MS          20
 #define RPM_DEMO_ENDPOINT_HOLD_MS 1000
@@ -143,8 +147,10 @@ static lv_obj_t *s_can_screen_test_rx;
 static lv_obj_t *s_can_screen_test_last;
 static lv_obj_t *s_can_screen_test_tx;
 
-static void can_screen_test_callback(uint32_t can_id, uint8_t *data, uint8_t len)
+static void can_screen_test_callback(uint32_t can_id, bool is_extended,
+                                     const uint8_t *data, uint8_t len)
 {
+    (void)vehicle_can_receive(can_id, is_extended, data, len);
     taskENTER_CRITICAL(&s_can_screen_test_lock);
     s_can_screen_test_data.rx_count++;
     s_can_screen_test_data.last_id = can_id;
@@ -223,10 +229,14 @@ static void can_screen_test_ui_task(void *arg)
                      data.last_data[4], data.last_data[5], data.last_data[6], data.last_data[7]);
             lv_label_set_text(s_can_screen_test_last, text);
 
+#if AMI_RECEIVE_ONLY
+            snprintf(text, sizeof(text), "AMI application TX: DISABLED (receive-only mode)");
+#else
             snprintf(text, sizeof(text),
                      "ESP test TX: ID 0x%08X every 1 s    success: %lu    failed: %lu",
                      CAN_SCREEN_TEST_TX_ID, (unsigned long)data.tx_ok_count,
                      (unsigned long)data.tx_fail_count);
+#endif
             lv_label_set_text(s_can_screen_test_tx, text);
             lvgl_port_unlock();
         }
@@ -279,9 +289,10 @@ static void can_screen_test_start(void)
         lvgl_port_unlock();
     }
 
+    vehicle_can_init();
     int can_ret = bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_screen_test_callback);
     ESP_LOGI(TAG, "CAN-B diagnostic init: TX=%d RX=%d result=%d", CAN_TX_PIN, CAN_RX_PIN, can_ret);
-    if (can_ret == 0) {
+    if (can_ret == 0 && !AMI_RECEIVE_ONLY) {
         xTaskCreatePinnedToCore(can_screen_test_tx_task, "can_test_tx", 3072,
                                 NULL, 4, NULL, tskNO_AFFINITY);
     }
@@ -377,8 +388,14 @@ static void lcd_minimal_test(void)
  * @param       len    : 数据长度
  * @retval      无
  */
-static void can_data_callback(uint32_t can_id, uint8_t *data, uint8_t len)
+static void can_data_callback(uint32_t can_id, bool is_extended,
+                              const uint8_t *data, uint8_t len)
 {
+    if (!is_extended) {
+        (void)vehicle_can_receive(can_id, false, data, len);
+        return;
+    }
+
     if (!data)
         return;
 
@@ -489,9 +506,9 @@ static void rpm_internal_demo_task(void *arg)
             0x00            /* 无综合报警 */
         };
 
-        can_data_callback(VCU_TO_MCU_CMD_ID, command, sizeof(command));
-        can_data_callback(MCU_TO_VCU_STATUS1_ID, status1, sizeof(status1));
-        can_data_callback(MCU_TO_VCU_STATUS2_ID, (uint8_t *)status2_demo, sizeof(status2_demo));
+        can_data_callback(VCU_TO_MCU_CMD_ID, true, command, sizeof(command));
+        can_data_callback(MCU_TO_VCU_STATUS1_ID, true, status1, sizeof(status1));
+        can_data_callback(MCU_TO_VCU_STATUS2_ID, true, status2_demo, sizeof(status2_demo));
 
         if ((rpm % 500) == 0 || rpm == RPM_DEMO_YELLOW_HOLD_RPM)
             ESP_LOGI(TAG, "RPM demo: %d", rpm);
@@ -957,6 +974,8 @@ static lv_obj_t *ami_selection_led(uint8_t index)
 
 static lv_obj_t *s_ami_selection_label;
 
+static void inspect_show_stage(uint8_t stage);
+
 static void ami_show_selection(uint8_t selected)
 {
     static const char *const names[AMI_SELECTION_COUNT] = {
@@ -984,8 +1003,8 @@ static void ami_show_selection(uint8_t selected)
         if (led)
         {
             bool is_selected = (i == selected);
-            /* 未选择为红色，当前选择为绿色。 */
-            lv_led_set_color(led, lv_color_hex(is_selected ? 0x39ff65 : 0xff2020));
+            /* The selected AMI task is red; all other task LEDs remain green. */
+            lv_led_set_color(led, lv_color_hex(is_selected ? 0xff2020 : 0x00ff73));
             lv_led_set_brightness(led, 255);
         }
     }
@@ -1003,6 +1022,25 @@ static void ami_show_selection(uint8_t selected)
     }
 
     lv_obj_invalidate(objects.ami);
+}
+
+/* The EEZ project presently contains one driving page, one shared autonomous
+ * dashboard and one inspection page.  The four autonomous tasks therefore
+ * enter the shared dashboard; INSPECT enters its dedicated page. */
+static void ami_open_selection(uint8_t selected, uint8_t *inspect_stage,
+                               bool *inspect_led_on, TickType_t *inspect_blink_tick)
+{
+    if (selected == 0) {
+        loadScreen(SCREEN_ID_DRIVER_VIEW);
+    } else if (selected == AMI_SELECTION_COUNT - 1) {
+        *inspect_stage = 0;
+        *inspect_led_on = false;
+        *inspect_blink_tick = xTaskGetTickCount();
+        inspect_show_stage(*inspect_stage);
+        loadScreen(SCREEN_ID_INSPECT);
+    } else {
+        loadScreen(SCREEN_ID_AUTONOMOUS);
+    }
 }
 
 static void inspect_show_stage(uint8_t stage)
@@ -1190,18 +1228,8 @@ static void ui_update_task(void *arg)
                 }
                 else if (event == ROTARY_EVENT_PRESS && ami_selection != UINT8_MAX)
                 {
-                    if (ami_selection == AMI_SELECTION_COUNT - 1)
-                    {
-                        inspect_stage = 0;
-                        inspect_led_on = false;
-                        inspect_blink_tick = xTaskGetTickCount();
-                        inspect_show_stage(inspect_stage);
-                        loadScreen(SCREEN_ID_INSPECT);
-                    }
-                    else
-                    {
-                        loadScreen(SCREEN_ID_AUTONOMOUS);
-                    }
+                    ami_open_selection(ami_selection, &inspect_stage,
+                                       &inspect_led_on, &inspect_blink_tick);
                     ESP_LOGI(TAG, "Rotary press, selection=%u", ami_selection);
                 }
             }
@@ -1228,18 +1256,8 @@ static void ui_update_task(void *arg)
             {
                 if (active_scr == objects.ami && ami_selection != UINT8_MAX)
                 {
-                    if (ami_selection == AMI_SELECTION_COUNT - 1)
-                    {
-                        inspect_stage = 0;
-                        inspect_led_on = false;
-                        inspect_blink_tick = xTaskGetTickCount();
-                        inspect_show_stage(inspect_stage);
-                        loadScreen(SCREEN_ID_INSPECT);
-                    }
-                    else
-                    {
-                        loadScreen(SCREEN_ID_AUTONOMOUS);
-                    }
+                    ami_open_selection(ami_selection, &inspect_stage,
+                                       &inspect_led_on, &inspect_blink_tick);
                 }
             }
             extio9_last = curr;
@@ -1388,6 +1406,7 @@ void app_main(void)
      * panel.  Start CAN here so reception is already active during the LVGL
      * and display startup sequence. */
     ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);
+    vehicle_can_init();
     if (bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_data_callback) == 0)
     {
         ESP_LOGI(TAG, "CAN initialized successfully");
@@ -1435,10 +1454,8 @@ void app_main(void)
     /* 创建独立CAN接收调试页；启动页保持AUTONOMOUS原界面。 */
     autonomous_can_dashboard_init();
 
-    /*
-     * GPIO3还用于LCD RGB识别(M2)，因此旋钮必须放在lvgl_demo()之后初始化；
-     * 否则旋钮模块的VCC/上拉会改变LCD识别电平，导致MIPI屏被误判为RGB屏。
-     */
+    /* GPIO3 is sampled as the panel-ID M2 line during lcd_init().  Configure
+     * it as the EC11 push input only after LVGL/LCD initialisation completes. */
 #if ROTARY_INPUT_ENABLE
     ESP_ERROR_CHECK(rotary_input_init());
 #endif

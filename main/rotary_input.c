@@ -8,10 +8,12 @@
 
 #define TAG "ROTARY"
 
-/* GPIO3/4/5连接RGB LCD B7/B6/B5，禁止接旋钮。 */
-#define ROTARY_A_GPIO  GPIO_NUM_3
-#define ROTARY_B_GPIO  GPIO_NUM_5
-#define ROTARY_SW_GPIO GPIO_NUM_4
+/* EC11 wiring used on this AMI:
+ *   A  -> GPIO4, B -> GPIO2, push switch -> GPIO3.
+ * Each signal is active-low and uses the ESP32 internal pull-up. */
+#define ROTARY_A_GPIO  GPIO_NUM_4
+#define ROTARY_B_GPIO  GPIO_NUM_2
+#define ROTARY_SW_GPIO GPIO_NUM_3
 
 #define ROTARY_QUEUE_LENGTH       16
 #define ROTARY_TASK_PERIOD_MS     2
@@ -31,7 +33,8 @@ static void rotary_task(void *arg)
     uint8_t stable_switch = 1;
     uint8_t switch_count = 0;
 
-    /* A/B顺序如果与实际旋钮相反，只需交换LEFT和RIGHT事件。 */
+    /* A/B follows the requested A=GPIO4 / B=GPIO2 wiring.  A positive
+     * quadrature cycle is the clockwise/menu-next direction. */
     static const int8_t transition_table[16] = {
          0, -1,  1,  0,
          1,  0,  0, -1,
@@ -110,7 +113,7 @@ esp_err_t rotary_input_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "initialized: A=GPIO3 B=GPIO5 SW=GPIO4");
+    ESP_LOGI(TAG, "initialized: A=GPIO4 B=GPIO2 SW=GPIO3");
     return ESP_OK;
 }
 

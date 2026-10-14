@@ -447,6 +447,14 @@ static esp_err_t mipi_lcd_panelinit(esp_lcd_panel_t *panel)
         mirror_x = false;
     }
 
+#if MIPI_PANEL_ROTATE_180
+    /* A 180-degree rotation is a mirror on both physical scan axes.  Apply
+     * this after the panel-profile defaults so every supported controller
+     * uses the same mounting orientation. */
+    mirror_x = true;
+    mirror_y = true;
+#endif
+
     /* 发送初始化序列 */
     for (int i = 0; i < init_cmds_size; i++)
     {

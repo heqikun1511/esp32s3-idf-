@@ -23,7 +23,8 @@ void loadScreen(enum ScreensEnum screenId) {
 
 void ui_init() {
     create_screens();
-    loadScreen(SCREEN_ID_AUTONOMOUS);
+    /* The AMI task-selection screen is the boot screen for the EC11 test. */
+    loadScreen(SCREEN_ID_AMI);
 
 }
 

@@ -27,18 +27,15 @@ static void can_rx_task(void *arg)
         /* 等待接收CAN报文 (阻塞100ms) */
         if (twai_receive(&rx_msg, pdMS_TO_TICKS(100)) == ESP_OK)
         {
-            /* 只处理扩展帧 */
-            if (rx_msg.extd)
-            {
-                uint32_t can_id = rx_msg.identifier;
+            uint32_t can_id = rx_msg.identifier;
+            ESP_LOGD(TAG, "RX %s ID: 0x%08X, len=%d", rx_msg.extd ? "EXT" : "STD",
+                     can_id, rx_msg.data_length_code);
 
-                ESP_LOGD(TAG, "RX ID: 0x%08X, len=%d", can_id, rx_msg.data_length_code);
-            
-                /* 调用用户回调 */
-                if (s_user_callback)
-                {
-                    s_user_callback(can_id, rx_msg.data, rx_msg.data_length_code);
-                }
+            /* Forward both existing extended motor frames and the AMI's new
+             * standard vehicle-status frames to the application dispatcher. */
+            if (s_user_callback)
+            {
+                s_user_callback(can_id, rx_msg.extd, rx_msg.data, rx_msg.data_length_code);
             }
         }
     }

@@ -27,8 +27,13 @@
 #include <string.h>
 
 
-/* 注意：以RGBLCD为主，如RGBLCD和MIPI LCD插入到开发板上，则默认选择RGBLCD */
-/* 首先读取RGBLCD ID，如没有接入RGBLCD，则读取MIPI LCD */
+/* This product has one fixed MIPI-DSI panel.  Do not probe the optional RGB
+ * development-board panel-ID pins: GPIO14/GPIO8/GPIO3 are ordinary user GPIOs
+ * on the custom board and may be connected to external controls. */
+#define LCD_FORCE_MIPI_PANEL     1
+
+/* Legacy RGB development-board ID pins; retained only for an optional future
+ * RGB build, never read while LCD_FORCE_MIPI_PANEL is enabled. */
 #define GPIO_LCD_ID1     (GPIO_NUM_14)
 #define GPIO_LCD_ID2     (GPIO_NUM_8)
 #define GPIO_LCD_ID3     (GPIO_NUM_3)

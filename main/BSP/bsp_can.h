@@ -1,6 +1,7 @@
 #ifndef __BSP_CAN_H
 #define __BSP_CAN_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* CAN扩展帧ID定义 */
@@ -9,7 +10,8 @@
 #define MCU_TO_VCU_STATUS2_ID 0x0CFFC7EF  /* MCU→VCU 电机状态信息2 */
 
 /* CAN接收回调函数类型 */
-typedef void (*can_data_callback_t)(uint32_t can_id, uint8_t *data, uint8_t len);
+typedef void (*can_data_callback_t)(uint32_t can_id, bool is_extended,
+                                    const uint8_t *data, uint8_t len);
 
 typedef struct
 {
