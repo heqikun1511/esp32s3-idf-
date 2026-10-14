@@ -52,6 +52,11 @@ void lvgl_port_unlock(void)
 static bool g_need_rotate = false;
 static uint16_t *g_rot_buf = NULL;
 
+/* Rotate the completed logical landscape UI by 180 degrees in software.  This
+ * avoids altering the HX8399 video-panel scan order (MADCTL), which can cause
+ * corrupted output when both controller scan axes are flipped. */
+#define LVGL_DISPLAY_ROTATE_180 1
+
 /* Forward declarations */
 void increase_lvgl_tick(void *arg);
 
@@ -206,15 +211,26 @@ void lvgl_disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color
     uint32_t *px32 = (uint32_t *)color_p;    /* LVGL 32-bit ARGB8888 */
 
     if (g_need_rotate) {
-        lv_coord_t logical_total_w = disp_drv->hor_res;
         lv_coord_t logical_w = lv_area_get_width(area);
         lv_coord_t phys_w = lcddev.width;
         lv_coord_t phys_h = lcddev.height;
+#if !LVGL_DISPLAY_ROTATE_180
+        lv_coord_t logical_total_w = disp_drv->hor_res;
+#endif
 
         for (lv_coord_t ly = area->y1; ly <= area->y2; ly++) {
             for (lv_coord_t lx = area->x1; lx <= area->x2; lx++) {
-                lv_coord_t px = ly;
-                lv_coord_t py = logical_total_w - 1 - lx;
+                lv_coord_t px;
+                lv_coord_t py;
+#if LVGL_DISPLAY_ROTATE_180
+                /* Base landscape-to-portrait mapping is (ly, W-1-lx).
+                 * Its 180-degree counterpart is (phys_w-1-ly, lx). */
+                px = phys_w - 1 - ly;
+                py = lx;
+#else
+                px = ly;
+                py = logical_total_w - 1 - lx;
+#endif
                 if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
                     uint32_t argb = px32[(ly - area->y1) * logical_w + (lx - area->x1)];
                     uint8_t r = (argb >> 16) & 0xFF;

@@ -44,9 +44,11 @@
  */
 #define MIPI_DSI_LANE_BITRATE_MBPS      700     /* ATK-MD0550M 两-lane RGB565 原始驱动参数 */
 
-/* Physical mounting orientation of the fixed panel.  Both scan axes are
- * mirrored in the panel controller, giving a 180-degree display rotation. */
-#define MIPI_PANEL_ROTATE_180           1
+/* Keep the HX8399 video scan configuration at its validated panel default.
+ * The required 180-degree product orientation is applied in the ESP32 frame
+ * buffer conversion instead; changing both MADCTL scan bits can corrupt video
+ * output on this panel. */
+#define MIPI_PANEL_ROTATE_180           0
 
 /* One-shot D0 LP/BTA diagnostic. Set to 0 after the hardware test. */
 /* HX8399 does not answer the generic DCS ID reads.  The panel profile is
